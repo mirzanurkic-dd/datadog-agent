@@ -111,11 +111,12 @@ type insertionErrorKey struct {
 
 // Outcomes of an event counted as an insertion error
 const (
-	insertionErrorKept    = "kept"
-	insertionErrorDropped = "dropped"
+	insertionErrorKept         = "kept"
+	insertionErrorUnattributed = "unattributed"
+	insertionErrorDropped      = "dropped"
 )
 
-var insertionErrorOutcomes = []string{insertionErrorKept, insertionErrorDropped}
+var insertionErrorOutcomes = []string{insertionErrorKept, insertionErrorUnattributed, insertionErrorDropped}
 
 // perEventTypeMetrics holds the precomputed statsd tags and the counters for a
 // (source, event_type) pair.
@@ -1270,7 +1271,7 @@ func (m *ManagerV2) SendStats() error {
 }
 
 // insertEventIntoProfile gets or creates a profile for the workload and inserts the event into its ActivityTree.
-// Returns the profile and whether the event was actually inserted (new data added).
+// Returns the profile and whether the event added new data to the process tree.
 func (m *ManagerV2) insertEventIntoProfile(event *model.Event) (*profile.Profile, bool) {
 	if !m.config.RuntimeSecurity.SecurityProfileV2Enabled {
 		return nil, false
@@ -1323,6 +1324,7 @@ func (m *ManagerV2) insertEventIntoProfile(event *model.Event) (*profile.Profile
 	// Same lock as FinalizePatterns, so eventNodeBase can't be folded before its cookie exists.
 	secprof.Lock()
 	inserted, processNode, eventNodeBase, err := secprof.InsertLocked(event, true, imageTag, activity_tree.Runtime, m.resolvers)
+	unattributed := processNode != nil && processNode == secprof.ActivityTree.UnattributedActivity
 	if err == nil {
 		m.retargetSampleCookies(secprof, secprof.ActivityTree.Stats.TakeMovedNodes())
 		m.registerSampleCookie(event, secprof, processNode, eventNodeBase, imageTag)
@@ -1339,10 +1341,16 @@ func (m *ManagerV2) insertEventIntoProfile(event *model.Event) (*profile.Profile
 		return nil, false
 	}
 	if event.Error != nil {
-		m.incrementInsertionError(event.GetEventType(), event.Error, insertionErrorKept)
+		outcome := insertionErrorKept
+		if unattributed {
+			outcome = insertionErrorUnattributed
+		}
+		m.incrementInsertionError(event.GetEventType(), event.Error, outcome)
 	}
 
-	return secprof, inserted
+	// the unattributed activity isn't compared with the activity of the processes, what is new there may not be new
+	// for the workload
+	return secprof, inserted && !unattributed
 }
 
 // registerSampleCookie maps the event's sample cookie to its nodes. Callers must hold prof's lock.
@@ -1690,6 +1698,7 @@ func (m *ManagerV2) loadProfileFromStorage(selector cgroupModel.WorkloadSelector
 		profile.WithEventTypes(m.config.RuntimeSecurity.SecurityProfileV2EventTypes),
 		profile.WithWorkloadSelector(selector),
 		profile.WithObservedRollups(),
+		profile.WithUnattributedActivity(),
 		profile.WithPathPatterns(m.pathPatternConfig()),
 	)
 
@@ -1744,6 +1753,7 @@ func (m *ManagerV2) createNewProfile(selector cgroupModel.WorkloadSelector, even
 		profile.WithEventTypes(m.config.RuntimeSecurity.SecurityProfileV2EventTypes),
 		profile.WithWorkloadSelector(selector),
 		profile.WithObservedRollups(),
+		profile.WithUnattributedActivity(),
 		profile.WithPathPatterns(m.pathPatternConfig()),
 	)
 	secprof.SetTreeType(secprof, "security_profile")
