@@ -17,6 +17,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/textproto"
+	"runtime/debug"
 	"sync"
 
 	"golang.org/x/sync/errgroup"
@@ -32,7 +33,15 @@ import (
 // planning) gets symbolCopyTimeout and the upload, which includes encoding,
 // gets uploadTimeout. It reports and logs like the objcopy path, and returns
 // true on success.
-func (d *DatadogSymbolUploader) uploadSymbolStream(ctx context.Context, e *symbol.Elf, endpointIndices []int) bool {
+func (d *DatadogSymbolUploader) uploadSymbolStream(ctx context.Context, e *symbol.Elf, endpointIndices []int) (ok bool) {
+	// The ELF is parsed in-process, unlike with objcopy: a parser bug on one
+	// input must fail that upload, not crash the profiler.
+	defer func() {
+		if r := recover(); r != nil {
+			d.reportExtractError(e, fmt.Errorf("panic while streaming symbols: %v\n%s", r, debug.Stack()))
+			ok = false
+		}
+	}()
 	planCtx, cancelPlan := context.WithTimeout(ctx, symbolCopyTimeout)
 	stream, metadata, err := d.planSymbolStream(planCtx, e)
 	cancelPlan()
@@ -92,7 +101,7 @@ func (d *DatadogSymbolUploader) sendSymbolSource(ctx context.Context, size int64
 	var mu sync.Mutex
 	err = d.sendSymbolStream(ctx, size, func(w io.Writer) error {
 		out := &outputErrorWriter{w: w}
-		writeErr := writeELF(out)
+		writeErr := writeRecovered(writeELF, out)
 		if writeErr != nil && out.err == nil && ctx.Err() == nil {
 			mu.Lock()
 			if sourceErr == nil {
@@ -103,6 +112,17 @@ func (d *DatadogSymbolUploader) sendSymbolSource(ctx context.Context, size int64
 		return writeErr
 	}, metadata, indices)
 	return sourceErr, err
+}
+
+// writeRecovered runs writeELF and turns a panic into an error. Each endpoint
+// writes from its own goroutine, out of reach of uploadSymbolStream's recover.
+func writeRecovered(writeELF func(io.Writer) error, w io.Writer) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("panic while streaming symbols: %v\n%s", r, debug.Stack())
+		}
+	}()
+	return writeELF(w)
 }
 
 // outputErrorWriter records the output's write error.

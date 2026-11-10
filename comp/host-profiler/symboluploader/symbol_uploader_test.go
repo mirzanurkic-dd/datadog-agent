@@ -1265,6 +1265,36 @@ func TestStreamingSymbolUploadRetryAfterFailure(t *testing.T) {
 	require.Equal(t, map[string]int{reasonIntakeError: 1, reasonUploaded: 1, reasonAlreadyUploaded: 1}, uploadReportCounts(t, reports))
 }
 
+func TestStreamingSymbolUploadRecoversFromPanics(t *testing.T) {
+	reports := captureUploadReports(t)
+	uploader, err := newTestUploader(t.Context(), uploaderOpts{streamSymbols: true})
+	require.NoError(t, err)
+	// A test ELF without an open file makes planning panic.
+	e := symbol.NewElfForTest("/missing", runtime.GOARCH, "build-id", "", libpf.FileID{})
+	require.False(t, uploader.upload(t.Context(), e, []int{0}))
+	uploader.reporter.flush()
+	require.Equal(t, map[string]int{reasonExtractError: 1}, uploadReportCounts(t, reports))
+}
+
+// A panic while writing runs in an endpoint's goroutine; it must fail the
+// upload as an extraction error, not crash the profiler.
+func TestSendSymbolSourceRecoversFromWriterPanics(t *testing.T) {
+	uploader, err := newTestUploader(t.Context(), uploaderOpts{streamSymbols: true})
+	require.NoError(t, err)
+	uploader.client.Transport = symbolUploadRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		_, err := io.Copy(io.Discard, req.Body)
+		return httpmock.NewStringResponse(http.StatusOK, ""), err
+	})
+	sourceErr, err := uploader.sendSymbolSource(t.Context(), 1<<20, func(w io.Writer) error {
+		if _, err := w.Write([]byte("partial ELF")); err != nil {
+			return err
+		}
+		panic("writer bug")
+	}, &symbolUploadRequestMetadata{}, []int{0, 1})
+	require.Error(t, err)
+	require.ErrorContains(t, sourceErr, "panic while streaming symbols: writer bug")
+}
+
 func TestStreamingReportsUnsupportedELF(t *testing.T) {
 	reports := captureUploadReports(t)
 	uploader, err := newTestUploader(t.Context(), uploaderOpts{streamSymbols: true})
