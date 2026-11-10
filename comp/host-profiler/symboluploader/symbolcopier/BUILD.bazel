@@ -1,4 +1,5 @@
 load("@rules_go//go:def.bzl", "go_library")
+load("//bazel/rules/go:dd_agent_go_test.bzl", "dd_agent_go_test")
 
 go_library(
     name = "symbolcopier",
@@ -22,6 +23,39 @@ go_library(
             "//pkg/util/elfstream",
             "//pkg/util/safeelf",
             "@org_golang_x_sys//unix",
+        ],
+        "//conditions:default": [],
+    }),
+)
+
+dd_agent_go_test(
+    name = "stream_test",
+    srcs = ["stream_test.go"],
+    data = [
+        "//comp/host-profiler/symboluploader/symbolcopier/testdata:libnative_debug.so",
+        "//comp/host-profiler/symboluploader/symbolcopier/testdata:native_debug",
+        "//comp/host-profiler/symboluploader/symbolcopier/testdata:native_dynsym",
+    ],  # keep
+    env = {
+        "NATIVE_DEBUG": "$(rlocationpath //comp/host-profiler/symboluploader/symbolcopier/testdata:native_debug)",
+        "NATIVE_DYNSYM": "$(rlocationpath //comp/host-profiler/symboluploader/symbolcopier/testdata:native_dynsym)",
+        "NATIVE_SHARED_DEBUG": "$(rlocationpath //comp/host-profiler/symboluploader/symbolcopier/testdata:libnative_debug.so)",
+    },  # keep
+    target_compatible_with = ["@platforms//os:linux"],
+    deps = select({
+        "@rules_go//go/platform:android": [
+            ":symbolcopier",
+            "//comp/host-profiler/symboluploader/symbol",
+            "//pkg/util/safeelf",
+            "@com_github_stretchr_testify//require",
+            "@rules_go//go/runfiles",
+        ],
+        "@rules_go//go/platform:linux": [
+            ":symbolcopier",
+            "//comp/host-profiler/symboluploader/symbol",
+            "//pkg/util/safeelf",
+            "@com_github_stretchr_testify//require",
+            "@rules_go//go/runfiles",
         ],
         "//conditions:default": [],
     }),

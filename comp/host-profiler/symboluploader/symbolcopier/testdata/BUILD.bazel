@@ -1,0 +1,39 @@
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
+
+# Native ELF fixtures for //comp/host-profiler/symboluploader/symbolcopier:stream_test.
+# They are only read by the test, never executed.
+
+# Executable with DWARF and a static symbol table.
+cc_binary(
+    name = "native_debug",
+    srcs = ["native.c"],
+    copts = ["-g"],
+    linkopts = ["-Wl,--build-id"],
+    target_compatible_with = ["@platforms//os:linux"],
+    visibility = ["//comp/host-profiler/symboluploader/symbolcopier:__pkg__"],
+)
+
+# Stripped executable that only exports dynamic symbols.
+cc_binary(
+    name = "native_dynsym",
+    srcs = ["native.c"],
+    linkopts = [
+        "-Wl,--build-id",
+        "-Wl,--export-dynamic",
+        "-s",
+    ],
+    target_compatible_with = ["@platforms//os:linux"],
+    visibility = ["//comp/host-profiler/symboluploader/symbolcopier:__pkg__"],
+)
+
+# Shared object with DWARF.
+cc_binary(
+    name = "libnative_debug.so",
+    srcs = ["native.c"],
+    copts = ["-g"],
+    defines = ["NATIVE_LIBRARY"],
+    linkopts = ["-Wl,--build-id"],
+    linkshared = True,
+    target_compatible_with = ["@platforms//os:linux"],
+    visibility = ["//comp/host-profiler/symboluploader/symbolcopier:__pkg__"],
+)
