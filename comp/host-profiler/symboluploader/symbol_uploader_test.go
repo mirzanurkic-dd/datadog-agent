@@ -10,6 +10,7 @@ package symboluploader
 import (
 	"bytes"
 	"context"
+	"debug/gosym"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,7 +26,9 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -43,6 +46,7 @@ import (
 	"go.opentelemetry.io/ebpf-profiler/reporter"
 
 	"github.com/DataDog/datadog-agent/comp/host-profiler/symboluploader/symbol"
+	"github.com/DataDog/datadog-agent/pkg/util/elfstream"
 	elf "github.com/DataDog/datadog-agent/pkg/util/safeelf"
 )
 
@@ -230,7 +234,14 @@ func checkRequest(t *testing.T, req *http.Request, expectedSymbolSource symbol.S
 	require.NoError(t, err)
 	require.Equal(t, expectedSymbolSource.String(), result["symbol_source"])
 
-	elfFile, err := elf.NewFile(f)
+	data, err := io.ReadAll(f)
+	require.NoError(t, err)
+	// Streaming compresses only the ELF file part.
+	if bytes.HasPrefix(data, []byte{0x28, 0xb5, 0x2f, 0xfd}) {
+		data, err = zstd.Decompress(nil, data)
+		require.NoError(t, err)
+	}
+	elfFile, err := elf.NewFile(bytes.NewReader(data))
 	require.NoError(t, err)
 	defer elfFile.Close()
 
@@ -293,6 +304,7 @@ type uploaderOpts struct {
 	uploadDynamicSymbols           bool
 	uploadGoPCLnTab                bool
 	disableDebugSectionCompression bool
+	streamSymbols                  bool
 }
 
 func newTestUploader(ctx context.Context, opts uploaderOpts) (*DatadogSymbolUploader, error) {
@@ -309,6 +321,7 @@ func newTestUploader(ctx context.Context, opts uploaderOpts) (*DatadogSymbolUplo
 			Enabled:              true,
 			UploadDynamicSymbols: opts.uploadDynamicSymbols,
 			UploadGoPCLnTab:      opts.uploadGoPCLnTab,
+			StreamSymbols:        opts.streamSymbols,
 			SymbolQueryInterval:  0,
 			SymbolEndpoints:      endpoints,
 		},
@@ -318,10 +331,11 @@ func newTestUploader(ctx context.Context, opts uploaderOpts) (*DatadogSymbolUplo
 }
 
 type buildOptions struct {
-	dynsym           bool
-	symtab           bool
-	debugInfos       bool
-	corruptGoPCLnTab bool
+	dynsym            bool
+	symtab            bool
+	debugInfos        bool
+	corruptGoPCLnTab  bool
+	uncompressedDWARF bool
 }
 
 func resolveRunfile(t *testing.T, loc string) string {
@@ -366,6 +380,9 @@ func buildGo(t *testing.T, tmpDir, buildID string, opts buildOptions) string {
 	ldflags := "-ldflags=-buildid=" + buildID + " "
 	if opts.dynsym {
 		ldflags += "-linkmode=external "
+	}
+	if opts.uncompressedDWARF {
+		ldflags += "-compressdwarf=false "
 	}
 
 	args = append(args, ldflags, "./testdata/helloworld.go")
@@ -824,4 +841,437 @@ func TestNewDatadogSymbolUploaderPropagatesReportConfig(t *testing.T) {
 			require.Equal(t, tt.wantMax, uploader.reporter.errRep.maxPaths)
 		})
 	}
+}
+
+type symbolUploadRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f symbolUploadRoundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestStreamingSymbolUpload(t *testing.T) {
+	// Environment changes are deliberately non-parallel. Fixture construction is
+	// outside the diskless portion; only upload must work without tmpdir/objcopy.
+	for _, tc := range []struct {
+		name   string
+		build  buildOptions
+		goInfo bool
+		source symbol.Source
+	}{
+		{"stripped_go", buildOptions{}, true, symbol.SourceGoPCLnTab},
+		{"external_go", buildOptions{dynsym: true}, true, symbol.SourceGoPCLnTab},
+		{"static_symbols", buildOptions{symtab: true}, false, symbol.SourceSymbolTable},
+		{"dynamic_symbols", buildOptions{dynsym: true, corruptGoPCLnTab: true}, false, symbol.SourceDynamicSymbolTable},
+		{"dwarf_and_go", buildOptions{dynsym: true, symtab: true, debugInfos: true}, true, symbol.SourceDebugInfo},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			exe := buildGo(t, t.TempDir(), "stream_test_build_id", tc.build)
+			e, err := symbol.NewElfFromDisk(exe)
+			require.NoError(t, err)
+			defer e.Close()
+			requests := make(chan *http.Request, 2)
+			t.Run("diskless_upload", func(t *testing.T) {
+				reports := captureUploadReports(t)
+				t.Setenv("PATH", "")
+				t.Setenv("TMPDIR", filepath.Join(t.TempDir(), "does-not-exist"))
+				uploader, err := newTestUploader(t.Context(), uploaderOpts{streamSymbols: true, uploadGoPCLnTab: tc.goInfo, uploadDynamicSymbols: true})
+				require.NoError(t, err, "streaming must not require objcopy")
+				uploader.client.Transport = symbolUploadRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+					data, err := io.ReadAll(req.Body)
+					if err != nil {
+						return nil, err
+					}
+					req.Body = io.NopCloser(bytes.NewReader(data))
+					requests <- req
+					return httpmock.NewStringResponse(http.StatusOK, ""), nil
+				})
+				require.True(t, uploader.upload(t.Context(), e, []int{0, 1}), "streaming upload failed; see uploader log")
+				uploader.reporter.flush()
+				require.Equal(t, map[string]int{reasonUploaded: 1}, uploadReportCounts(t, reports))
+			})
+			if len(requests) != 2 {
+				t.Fatal("diskless upload did not complete both destinations")
+			}
+			for range 2 {
+				req := <-requests
+				data, err := io.ReadAll(req.Body)
+				require.NoError(t, err)
+				req.Body = io.NopCloser(bytes.NewReader(data))
+				checkRequest(t, req, tc.source, tc.goInfo, "")
+				_, params, err := mime.ParseMediaType(req.Header.Get("Content-Type"))
+				require.NoError(t, err)
+				part, err := multipart.NewReader(bytes.NewReader(data), params["boundary"]).NextPart()
+				require.NoError(t, err)
+				encoded, err := io.ReadAll(part)
+				require.NoError(t, err)
+				elfBytes, err := zstd.Decompress(nil, encoded)
+				require.NoError(t, err)
+				f, err := elf.NewFile(bytes.NewReader(elfBytes))
+				require.NoError(t, err)
+				defer f.Close()
+				// Build IDs are read from note sections, so every note must survive.
+				original, err := elf.Open(exe)
+				require.NoError(t, err)
+				defer original.Close()
+				notes := 0
+				for _, want := range original.Sections {
+					if want.Type != elf.SHT_NOTE {
+						continue
+					}
+					notes++
+					got := f.Section(want.Name)
+					require.NotNil(t, got, want.Name)
+					wantData, err := want.Data()
+					require.NoError(t, err)
+					gotData, err := got.Data()
+					require.NoError(t, err)
+					require.Equal(t, wantData, gotData, want.Name)
+				}
+				require.Positive(t, notes, "fixture must carry build-ID notes")
+				if tc.goInfo {
+					pcln, err := f.Section(".gopclntab").Data()
+					require.NoError(t, err)
+					info, err := e.GoPCLnTab()
+					require.NoError(t, err)
+					table, err := gosym.NewTable(nil, gosym.NewLineTable(pcln, info.TextStart.Address))
+					require.NoError(t, err)
+					main := table.LookupFunc("main.main")
+					require.NotNil(t, main)
+					file, line, _ := table.PCToLine(main.Entry)
+					require.Contains(t, file, "helloworld.go")
+					require.Positive(t, line)
+				}
+			}
+		})
+	}
+}
+
+func TestSymbolCompressionWindow(t *testing.T) {
+	for _, tt := range []struct {
+		size   int64
+		window int
+	}{
+		{0, 128 * 1024},
+		{1, 128 * 1024},
+		{128*1024 - 1, 128 * 1024},
+		{128 * 1024, 128 * 1024},
+		{128*1024 + 1, 256 * 1024},
+		{200 * 1024, 256 * 1024},
+		{256 * 1024, 256 * 1024},
+		{256*1024 + 1, 512 * 1024},
+		{8*1024*1024 - 1, 8 * 1024 * 1024},
+		{8 * 1024 * 1024, 8 * 1024 * 1024},
+		{8*1024*1024 + 1, 8 * 1024 * 1024},
+		{1 << 30, 8 * 1024 * 1024},
+		{1<<63 - 1, 8 * 1024 * 1024},
+	} {
+		t.Run(strconv.FormatInt(tt.size, 10), func(t *testing.T) {
+			require.Equal(t, tt.window, 1<<symbolCompressionWindowLog(tt.size))
+		})
+	}
+}
+
+// Streaming compresses the complete ELF once, without newly encoding DWARF.
+func TestSymbolFileCompression(t *testing.T) {
+	exe := buildGo(t, t.TempDir(), "whole_symbol_build_id", buildOptions{symtab: true, debugInfos: true, uncompressedDWARF: true})
+	original, err := elf.Open(exe)
+	require.NoError(t, err)
+	defer original.Close()
+	e, err := symbol.NewElfFromDisk(exe)
+	require.NoError(t, err)
+	defer e.Close()
+	// Neither planning nor compression may require a spool or objcopy.
+	t.Setenv("PATH", "")
+	t.Setenv("TMPDIR", filepath.Join(t.TempDir(), "does-not-exist"))
+	uploader, err := newTestUploader(t.Context(), uploaderOpts{streamSymbols: true})
+	require.NoError(t, err)
+	var body []byte
+	var contentType string
+	uploader.client.Transport = symbolUploadRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		require.Empty(t, req.Header.Get("Content-Encoding"))
+		var err error
+		body, err = io.ReadAll(req.Body)
+		contentType = req.Header.Get("Content-Type")
+		return httpmock.NewStringResponse(http.StatusOK, ""), err
+	})
+	require.True(t, uploader.upload(t.Context(), e, []int{0}))
+	_, params, err := mime.ParseMediaType(contentType)
+	require.NoError(t, err)
+	require.True(t, bytes.HasSuffix(body, []byte("--"+params["boundary"]+"--\r\n")))
+	mr := multipart.NewReader(bytes.NewReader(body), params["boundary"])
+	part, err := mr.NextPart()
+	require.NoError(t, err)
+	require.Equal(t, "elf_symbol_file", part.FormName())
+	require.Equal(t, "elf_symbol_file", part.FileName())
+	require.Empty(t, part.Header.Get("Content-Encoding"))
+	encoded, err := io.ReadAll(part)
+	require.NoError(t, err)
+	require.True(t, bytes.HasPrefix(encoded, []byte{0x28, 0xb5, 0x2f, 0xfd}))
+	data, err := zstd.Decompress(nil, encoded)
+	require.NoError(t, err)
+	output, err := elf.NewFile(bytes.NewReader(data))
+	require.NoError(t, err)
+	defer output.Close()
+	require.Zero(t, output.Section(".debug_info").Flags&elf.SHF_COMPRESSED)
+	for _, section := range original.Sections {
+		if !strings.HasPrefix(section.Name, ".debug_") {
+			continue
+		}
+		before, err := section.Data()
+		require.NoError(t, err)
+		after, err := output.Section(section.Name).Data()
+		require.NoError(t, err)
+		require.Equal(t, before, after, section.Name)
+	}
+	part, err = mr.NextPart()
+	require.NoError(t, err)
+	require.Equal(t, "event", part.FormName())
+	var metadata symbolUploadRequestMetadata
+	require.NoError(t, json.NewDecoder(part).Decode(&metadata))
+	require.Equal(t, "elf_symbol_file", metadata.Type)
+	_, err = mr.NextPart()
+	require.ErrorIs(t, err, io.EOF)
+}
+
+func TestCompressedSymbolMultipartPerEndpoint(t *testing.T) {
+	uploader, err := newTestUploader(t.Context(), uploaderOpts{streamSymbols: true})
+	require.NoError(t, err)
+	payload := bytes.Repeat([]byte("complete ELF bytes\x00"), 10000)
+	uploader.client.Transport = symbolUploadRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		require.Empty(t, req.Header.Get("Content-Encoding"))
+		body, err := io.ReadAll(req.Body)
+		_, params, parseErr := mime.ParseMediaType(req.Header.Get("Content-Type"))
+		if parseErr != nil {
+			return nil, parseErr
+		}
+		mr := multipart.NewReader(bytes.NewReader(body), params["boundary"])
+		part, parseErr := mr.NextPart()
+		if parseErr != nil {
+			return nil, parseErr
+		}
+		encoded, parseErr := io.ReadAll(part)
+		if parseErr != nil {
+			return nil, parseErr
+		}
+		decoded, parseErr := zstd.Decompress(nil, encoded)
+		require.NoError(t, parseErr)
+		require.Equal(t, payload, decoded)
+		part, parseErr = mr.NextPart()
+		require.NoError(t, parseErr)
+		var metadata symbolUploadRequestMetadata
+		require.NoError(t, json.NewDecoder(part).Decode(&metadata))
+		require.Equal(t, "elf_symbol_file", metadata.Type)
+		_, parseErr = mr.NextPart()
+		require.ErrorIs(t, parseErr, io.EOF)
+		return httpmock.NewStringResponse(http.StatusOK, ""), err
+	})
+	var calls atomic.Int32
+	err = uploader.sendSymbolStream(t.Context(), int64(len(payload)), func(w io.Writer) error {
+		calls.Add(1)
+		_, err := w.Write(payload)
+		return err
+	}, &symbolUploadRequestMetadata{Type: "elf_symbol_file"}, []int{0, 1})
+	require.NoError(t, err)
+	require.Equal(t, int32(2), calls.Load(), "each endpoint gets its own write of the ELF")
+}
+
+// A stalled or failing endpoint must not hold back or fail delivery to the others.
+func TestStreamingEndpointsAreIndependent(t *testing.T) {
+	for _, failure := range []string{"stalled", "rejected"} {
+		t.Run(failure, func(t *testing.T) {
+			uploader, err := newTestUploader(t.Context(), uploaderOpts{streamSymbols: true})
+			require.NoError(t, err)
+			healthy := make(chan error, 1)
+			uploader.client.Transport = symbolUploadRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+				if strings.Contains(req.URL.Host, "a.com") {
+					if failure == "rejected" {
+						return httpmock.NewStringResponse(http.StatusInternalServerError, ""), nil
+					}
+					<-req.Context().Done() // Never reads the body.
+					return nil, req.Context().Err()
+				}
+				_, err := io.Copy(io.Discard, req.Body)
+				healthy <- err
+				return httpmock.NewStringResponse(http.StatusOK, ""), err
+			})
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			done := make(chan error, 1)
+			go func() {
+				done <- uploader.sendSymbolStream(ctx, 4<<20, func(w io.Writer) error {
+					_, err := w.Write(bytes.Repeat([]byte("ELF"), 4<<20/3))
+					return err
+				}, &symbolUploadRequestMetadata{}, []int{0, 1})
+			}()
+			select {
+			case err := <-healthy:
+				require.NoError(t, err)
+			case <-time.After(5 * time.Second):
+				t.Fatal("healthy endpoint was held back by the other endpoint")
+			}
+			cancel() // Release a stalled endpoint.
+			require.Error(t, <-done, "the failed endpoint keeps the upload retryable")
+		})
+	}
+}
+
+// Input read failures are extraction errors; failures writing to the upload are not.
+func TestSendSymbolSourceClassifiesErrors(t *testing.T) {
+	readErr := errors.New("input read failed")
+	for _, tt := range []struct {
+		name       string
+		status     int
+		writeELF   func(io.Writer) error
+		wantSource error
+		wantErr    bool
+	}{
+		{"source", http.StatusOK, func(io.Writer) error { return readErr }, readErr, true},
+		{"intake", http.StatusInternalServerError, func(w io.Writer) error {
+			_, err := w.Write(bytes.Repeat([]byte{1}, 1<<20))
+			return err
+		}, nil, true},
+		{"success", http.StatusOK, func(w io.Writer) error {
+			_, err := w.Write([]byte("elf"))
+			return err
+		}, nil, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			uploader, err := newTestUploader(t.Context(), uploaderOpts{streamSymbols: true})
+			require.NoError(t, err)
+			uploader.client.Transport = symbolUploadRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+				if tt.status != http.StatusOK {
+					// Reject early, without draining, so the producer sees a closed output.
+					return httpmock.NewStringResponse(tt.status, ""), nil
+				}
+				_, err := io.Copy(io.Discard, req.Body)
+				return httpmock.NewStringResponse(tt.status, ""), err
+			})
+			sourceErr, err := uploader.sendSymbolSource(t.Context(), 1<<20, tt.writeELF, &symbolUploadRequestMetadata{}, []int{0})
+			require.Equal(t, tt.wantErr, err != nil, "err=%v", err)
+			require.Equal(t, tt.wantSource, sourceErr)
+		})
+	}
+}
+
+type failingSymbolWriter struct {
+	err error
+}
+
+func (w failingSymbolWriter) Write(p []byte) (int, error) {
+	if bytes.HasPrefix(p, []byte{0x28, 0xb5, 0x2f, 0xfd}) {
+		return 0, w.err
+	}
+	return len(p), nil
+}
+
+func TestSymbolPayloadCompressionErrors(t *testing.T) {
+	failure := errors.New("symbol I/O failed")
+	for _, producerFailure := range []bool{false, true} {
+		t.Run(fmt.Sprintf("producer=%v", producerFailure), func(t *testing.T) {
+			var out bytes.Buffer
+			var target io.Writer = &out
+			if !producerFailure {
+				target = failingSymbolWriter{failure}
+			}
+			mw := multipart.NewWriter(target)
+			err := writeSymbolRequestBody(func(w io.Writer) error {
+				if _, err := w.Write([]byte("small payload buffered until encoder Close")); err != nil {
+					return err
+				}
+				if producerFailure {
+					return failure
+				}
+				return nil
+			}, int64(len("small payload buffered until encoder Close")), &symbolUploadRequestMetadata{}, mw)
+			require.ErrorIs(t, err, failure, "both source and frame-finalization errors must fail the upload")
+			require.NotContains(t, out.String(), "event.json", "do not publish metadata after failed ELF encoding")
+		})
+	}
+}
+
+func TestStreamingCompressionFailures(t *testing.T) {
+	exe := buildGo(t, t.TempDir(), "whole_symbol_failure", buildOptions{symtab: true, debugInfos: true, uncompressedDWARF: true})
+	for _, failure := range []string{"destination", "cancellation", "dry run"} {
+		t.Run(failure, func(t *testing.T) {
+			e, err := symbol.NewElfFromDisk(exe)
+			require.NoError(t, err)
+			defer e.Close()
+			t.Setenv("TMPDIR", filepath.Join(t.TempDir(), "missing"))
+			uploader, err := newTestUploader(t.Context(), uploaderOpts{streamSymbols: true})
+			require.NoError(t, err)
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			uploader.dryRun = failure == "dry run"
+			calls := make(chan struct{}, 2)
+			uploader.client.Transport = symbolUploadRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+				calls <- struct{}{}
+				if failure == "cancellation" {
+					cancel()
+					return nil, ctx.Err()
+				}
+				_, err := io.Copy(io.Discard, req.Body)
+				return httpmock.NewStringResponse(http.StatusServiceUnavailable, ""), err
+			})
+			require.Equal(t, failure == "dry run", uploader.upload(ctx, e, []int{0, 1}))
+			if failure == "dry run" {
+				require.Empty(t, calls)
+			} else {
+				require.Len(t, calls, 2)
+			}
+		})
+	}
+}
+
+func TestStreamingSymbolUploadRetryAfterFailure(t *testing.T) {
+	reports := captureUploadReports(t)
+	executable, err := os.Executable()
+	require.NoError(t, err)
+	uploader, err := newTestUploader(t.Context(), uploaderOpts{streamSymbols: true, uploadGoPCLnTab: true})
+	require.NoError(t, err)
+	metadata := newExecutableMetadata(t, executable)
+	// Drive admission, retrieval and upload synchronously; no backend query is
+	// needed to verify cache eviction and retry eligibility.
+	uploader.retrievalQueue = make(chan *reporter.ExecutableMetadata, 1)
+	for _, status := range []int{http.StatusServiceUnavailable, http.StatusOK} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			uploader.UploadSymbols(metadata)
+			require.Len(t, uploader.retrievalQueue, 1, "a failed upload must allow the same executable to be queued again")
+			retrieved := make(chan *symbol.Elf, 1)
+			uploader.symbolRetrievalWorker(t.Context(), <-uploader.retrievalQueue, retrieved)
+			require.Len(t, retrieved, 1)
+			e := <-retrieved
+			_, cached := uploader.uploadCache.Get(e.FileID())
+			require.True(t, cached, "retrieval must reserve the cache entry before upload")
+
+			calls := 0
+			uploader.client.Transport = symbolUploadRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+				calls++
+				if status == http.StatusOK {
+					if _, err := io.Copy(io.Discard, req.Body); err != nil {
+						return nil, err
+					}
+				}
+				return httpmock.NewStringResponse(status, ""), nil
+			})
+			uploader.uploadWorker(t.Context(), ElfWithBackendSources{
+				Elf: e, BackendSymbolSources: []SymbolQueryResult{{SymbolSource: symbol.SourceNone}},
+			})
+			require.Equal(t, 1, calls, "the attempt must reach the streaming transport")
+			_, cached = uploader.uploadCache.Get(e.FileID())
+			require.Equal(t, status == http.StatusOK, cached, "failure must evict the entry; success must retain it")
+		})
+	}
+	uploader.UploadSymbols(metadata)
+	require.Empty(t, uploader.retrievalQueue, "a successful retry must suppress further uploads")
+	uploader.reporter.flush()
+	require.Equal(t, map[string]int{reasonIntakeError: 1, reasonUploaded: 1, reasonAlreadyUploaded: 1}, uploadReportCounts(t, reports))
+}
+
+func TestStreamingReportsUnsupportedELF(t *testing.T) {
+	reports := captureUploadReports(t)
+	uploader, err := newTestUploader(t.Context(), uploaderOpts{streamSymbols: true})
+	require.NoError(t, err)
+	e := symbol.NewElfForTest("/unsupported", runtime.GOARCH, "build-id", "", libpf.FileID{})
+	uploader.reportExtractError(e, fmt.Errorf("plan symbol ELF: %w", elfstream.ErrUnsupported))
+	uploader.reportExtractError(e, errors.New("malformed"))
+	uploader.reporter.flush()
+	require.Equal(t, map[string]int{reasonUnsupportedELF: 1, reasonExtractError: 1}, uploadReportCounts(t, reports))
 }

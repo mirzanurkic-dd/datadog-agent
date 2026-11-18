@@ -77,6 +77,7 @@ type DatadogSymbolUploader struct {
 	uploadDynamicSymbols  bool
 	uploadGoPCLnTab       bool
 	compressDebugSections bool
+	streamSymbols         bool
 
 	uploadCache         *lru.SyncedLRU[libpf.FileID, struct{}]
 	client              *http.Client
@@ -90,9 +91,11 @@ type DatadogSymbolUploader struct {
 }
 
 func NewDatadogSymbolUploader(ctx context.Context, cfg *SymbolUploaderConfig) (*DatadogSymbolUploader, error) {
-	err := exec.CommandContext(ctx, "objcopy", "--version").Run()
-	if err != nil {
-		return nil, fmt.Errorf("objcopy is not available: %w", err)
+	var err error
+	if !cfg.StreamSymbols {
+		if err = exec.CommandContext(ctx, "objcopy", "--version").Run(); err != nil {
+			return nil, fmt.Errorf("objcopy is not available: %w", err)
+		}
 	}
 	if len(cfg.SymbolEndpoints) == 0 {
 		return nil, errors.New("no endpoints to upload symbols to")
@@ -116,7 +119,7 @@ func NewDatadogSymbolUploader(ctx context.Context, cfg *SymbolUploaderConfig) (*
 		return nil, fmt.Errorf("failed to create cache: %w", err)
 	}
 
-	compressDebugSections := !cfg.DisableDebugSectionCompression && CheckObjcopyZstdSupport(ctx)
+	compressDebugSections := !cfg.StreamSymbols && !cfg.DisableDebugSectionCompression && CheckObjcopyZstdSupport(ctx)
 
 	httpClient := &http.Client{Timeout: uploadTimeout}
 	defaultTransport, ok := http.DefaultTransport.(*http.Transport)
@@ -150,6 +153,7 @@ func NewDatadogSymbolUploader(ctx context.Context, cfg *SymbolUploaderConfig) (*
 		symbolQueriers:        symbolQueriers,
 		symbolQueryInterval:   cfg.SymbolQueryInterval,
 		compressDebugSections: compressDebugSections,
+		streamSymbols:         cfg.StreamSymbols,
 		reporter:              newUploadReporter(cfg.Report),
 	}, nil
 }
@@ -414,6 +418,9 @@ func (d *DatadogSymbolUploader) shouldUpload(e *symbol.Elf, existingSymbolSource
 
 // Returns true if the upload was successful, false otherwise
 func (d *DatadogSymbolUploader) upload(ctx context.Context, e *symbol.Elf, endpointIndices []int) bool {
+	if d.streamSymbols {
+		return d.uploadSymbolStream(ctx, e, endpointIndices)
+	}
 	symbolFile, err := d.createSymbolFile(ctx, e)
 	if err != nil {
 		d.reporter.Error(reasonExtractError, 1, e.Path())

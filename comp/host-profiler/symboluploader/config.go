@@ -44,6 +44,10 @@ type SymbolUploaderOptions struct {
 	UploadDynamicSymbols bool `mapstructure:"upload_dynamic_symbols"`
 	// UploadGoPCLnTab defines whether the agent should upload GoPCLnTab section for Go binaries to the backend.
 	UploadGoPCLnTab bool `mapstructure:"upload_gopclntab"`
+	// StreamSymbols enables experimental diskless ELF export. It preserves existing
+	// section compression and zstd-compresses the ELF file part. Unsupported ELFs
+	// fail without falling back to objcopy. Disabled by default.
+	StreamSymbols bool `mapstructure:"stream_symbols"`
 	// UseHTTP2 defines whether the agent should use HTTP/2 when uploading symbols.
 	UseHTTP2 bool `mapstructure:"use_http2"`
 	// SymbolQueryInterval defines the interval at which the agent should query the backend for symbols. A value of 0 disables batching.
