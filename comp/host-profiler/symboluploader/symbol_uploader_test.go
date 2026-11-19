@@ -1035,33 +1035,19 @@ func TestCompressedSymbolMultipartPerEndpoint(t *testing.T) {
 	uploader, err := newTestUploader(t.Context(), uploaderOpts{streamSymbols: true})
 	require.NoError(t, err)
 	payload := bytes.Repeat([]byte("complete ELF bytes\x00"), 10000)
+	type request struct {
+		body, contentType, contentEncoding string
+	}
+	requests := make(chan request, 2)
+	// Only record requests here: require must run on the test goroutine, not
+	// in the transport's goroutine.
 	uploader.client.Transport = symbolUploadRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-		require.Empty(t, req.Header.Get("Content-Encoding"))
 		body, err := io.ReadAll(req.Body)
-		_, params, parseErr := mime.ParseMediaType(req.Header.Get("Content-Type"))
-		if parseErr != nil {
-			return nil, parseErr
+		if err != nil {
+			return nil, err
 		}
-		mr := multipart.NewReader(bytes.NewReader(body), params["boundary"])
-		part, parseErr := mr.NextPart()
-		if parseErr != nil {
-			return nil, parseErr
-		}
-		encoded, parseErr := io.ReadAll(part)
-		if parseErr != nil {
-			return nil, parseErr
-		}
-		decoded, parseErr := zstd.Decompress(nil, encoded)
-		require.NoError(t, parseErr)
-		require.Equal(t, payload, decoded)
-		part, parseErr = mr.NextPart()
-		require.NoError(t, parseErr)
-		var metadata symbolUploadRequestMetadata
-		require.NoError(t, json.NewDecoder(part).Decode(&metadata))
-		require.Equal(t, "elf_symbol_file", metadata.Type)
-		_, parseErr = mr.NextPart()
-		require.ErrorIs(t, parseErr, io.EOF)
-		return httpmock.NewStringResponse(http.StatusOK, ""), err
+		requests <- request{string(body), req.Header.Get("Content-Type"), req.Header.Get("Content-Encoding")}
+		return httpmock.NewStringResponse(http.StatusOK, ""), nil
 	})
 	var calls atomic.Int32
 	err = uploader.sendSymbolStream(t.Context(), int64(len(payload)), func(w io.Writer) error {
@@ -1071,6 +1057,28 @@ func TestCompressedSymbolMultipartPerEndpoint(t *testing.T) {
 	}, &symbolUploadRequestMetadata{Type: "elf_symbol_file"}, []int{0, 1})
 	require.NoError(t, err)
 	require.Equal(t, int32(2), calls.Load(), "each endpoint gets its own write of the ELF")
+	close(requests)
+	require.Len(t, requests, 2)
+	for req := range requests {
+		require.Empty(t, req.contentEncoding)
+		_, params, err := mime.ParseMediaType(req.contentType)
+		require.NoError(t, err)
+		mr := multipart.NewReader(strings.NewReader(req.body), params["boundary"])
+		part, err := mr.NextPart()
+		require.NoError(t, err)
+		encoded, err := io.ReadAll(part)
+		require.NoError(t, err)
+		decoded, err := zstd.Decompress(nil, encoded)
+		require.NoError(t, err)
+		require.Equal(t, payload, decoded)
+		part, err = mr.NextPart()
+		require.NoError(t, err)
+		var metadata symbolUploadRequestMetadata
+		require.NoError(t, json.NewDecoder(part).Decode(&metadata))
+		require.Equal(t, "elf_symbol_file", metadata.Type)
+		_, err = mr.NextPart()
+		require.ErrorIs(t, err, io.EOF)
+	}
 }
 
 // A stalled or failing endpoint must not hold back or fail delivery to the others.
