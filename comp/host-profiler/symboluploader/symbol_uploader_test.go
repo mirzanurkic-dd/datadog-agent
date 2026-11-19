@@ -984,15 +984,16 @@ func TestSymbolFileCompression(t *testing.T) {
 	uploader, err := newTestUploader(t.Context(), uploaderOpts{streamSymbols: true})
 	require.NoError(t, err)
 	var body []byte
-	var contentType string
+	var contentType, contentEncoding string
+	// Only record the request here: require must run on the test goroutine.
 	uploader.client.Transport = symbolUploadRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-		require.Empty(t, req.Header.Get("Content-Encoding"))
 		var err error
 		body, err = io.ReadAll(req.Body)
-		contentType = req.Header.Get("Content-Type")
+		contentType, contentEncoding = req.Header.Get("Content-Type"), req.Header.Get("Content-Encoding")
 		return httpmock.NewStringResponse(http.StatusOK, ""), err
 	})
 	require.True(t, uploader.upload(t.Context(), e, []int{0}))
+	require.Empty(t, contentEncoding)
 	_, params, err := mime.ParseMediaType(contentType)
 	require.NoError(t, err)
 	require.True(t, bytes.HasSuffix(body, []byte("--"+params["boundary"]+"--\r\n")))
