@@ -147,7 +147,11 @@ func assertSchedulerTags(s *e2e.BaseSuite[environments.Kubernetes], run schedule
 				if !hasPointSince(metric, run.runningSince) {
 					continue
 				}
+				// A series without gpu_uuid is not a real GPU and must not count towards the GPUs that reported.
 				uuid := tagValue(metric.GetTags(), tags.KubeGPUUUID)
+				if uuid == "" {
+					continue
+				}
 				reportedUUIDs[uuid] = struct{}{}
 				// Any series tagged with the job pod, even before the scheduler tags arrive, must be
 				// of the allocated GPU.
