@@ -67,7 +67,7 @@ func runSchedulerGPUJob(s *e2e.BaseSuite[environments.Kubernetes], job scheduler
 						Name: "work",
 						// Not pause: the Agent excludes pause containers from container metrics.
 						// busybox is statically linked, so the LD_PRELOAD Mokka injects does not affect it.
-						Image:   busyboxImage(),
+						Image:   busyboxImage,
 						Command: []string{"sleep", "3600"},
 						Resources: corev1.ResourceRequirements{
 							// Explicit requests, so that quota-based schedulers can admit the Job.
@@ -98,7 +98,7 @@ func runSchedulerGPUJob(s *e2e.BaseSuite[environments.Kubernetes], job scheduler
 			return
 		}
 		pod := pods.Items[0]
-		assert.Equal(c, corev1.PodRunning, pod.Status.Phase, "job pod is not running: %s %s", pod.Status.Reason, pod.Status.Message)
+		assert.Equal(c, corev1.PodRunning, pod.Status.Phase, "job pod is not running: %s", podStartDiagnostics(ctx, kubeClient, &pod))
 		podName = pod.Name
 	}, 5*time.Minute, 5*time.Second, "the scheduler did not run the job on a mock GPU")
 	runningSince := time.Now().Unix()
