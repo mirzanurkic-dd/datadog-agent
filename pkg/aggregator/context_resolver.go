@@ -29,6 +29,9 @@ type Context struct {
 	taggerTags *tags.Entry
 	metricTags *tags.Entry
 	noIndex    bool
+	// filterable is set on check sampler contexts whose tags can be filtered at output.
+	// Needed in addition to mtype because HistogramBucket and ordinary Histogram both report HistogramType.
+	filterable bool
 	source     metrics.MetricSource
 
 	filteredIdentityRef uint32
@@ -173,7 +176,7 @@ func (cr *contextResolver) trackContext(metricSampleContext metrics.MetricSample
 			noIndex:    metricSampleContext.IsNoIndex(),
 			source:     metricSampleContext.GetSource(),
 		}
-		cr.trackOutput(context, filterList)
+		cr.trackOutput(context, metricSampleContext, filterList)
 		cr.contextsByKey[contextKey] = resolverEntry{
 			lastSeen: timestamp,
 			context:  context,
