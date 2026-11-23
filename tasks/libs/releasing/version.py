@@ -391,6 +391,15 @@ def create_version_json(ctx, git_sha_length=7):
         json.dump(packed_data, file, indent=4)
 
 
+def query_version_cached(ctx, major_version):
+    """Like `query_version`, but reads the pipeline's agent-version cache when available, so CI jobs don't need tags."""
+    cache = _load_agent_version_cache(ctx, pipeline_id=os.getenv("CI_PIPELINE_ID"))
+    try:
+        return tuple(cache[major_version])
+    except (KeyError, TypeError, ValueError):
+        return query_version(ctx, major_version)
+
+
 def query_version(ctx, major_version, git_sha_length=7, release=False):
     # The describe string format is <tag>-<number of commits since the tag>-g<commit hash>
     # e.g. 6.0.0-beta.0-1-g4f19118
