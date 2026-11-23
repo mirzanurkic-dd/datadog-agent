@@ -233,7 +233,9 @@ func WithDeployArgoRollout() RunOption {
 // The Helm-deployed Agent is configured to see the mock GPUs (see mokka.AgentHelmValues).
 //
 // Call it once per GPU pool, giving each installation its own mokka.WithName and
-// mokka.WithNodeSelector, e.g. to combine a T4 pool and a GB200 pool in the same cluster.
+// mokka.WithNodeSelector, e.g. to combine a T4 pool and a GB200 pool in the same cluster
+// (untested: no suite combines several pools yet, and the chart may not support several releases
+// in one namespace). Duplicate names are rejected.
 //
 // Mokka and the device plugin are pulled from ghcr.io and nvcr.io, so the VM needs internet
 // access (WithInternetAccess) until those images are mirrored in the internal registry.
@@ -268,7 +270,7 @@ func WithStandaloneOTelAgent(fn StandaloneDdotDeployFunc) RunOption {
 	return func(p *RunParams) error { p.standaloneDdotFunc = fn; return nil }
 }
 
-// WithKindWorkerNodes configures the kind cluster worker nodes with custom labels and taints.
+// WithKindWorkerNodes configures the kind cluster worker nodes: their labels, taints, kubelet flags and mounts.
 // Use this to test workloads that depend on node topology (e.g. spot vs on-demand capacity types).
 func WithKindWorkerNodes(nodes ...kubecomp.KindWorkerNode) RunOption {
 	return func(p *RunParams) error {
