@@ -74,8 +74,7 @@ fn test_cli_daemon_shutdown_stops_children() {
     );
 }
 
-/// A SIGTERM sent while the catalog is still starting must end the daemon cleanly, not kill
-/// it. The process gate reads a FIFO, so the daemon blocks in startup once its socket is up.
+/// A SIGTERM during startup must end the daemon cleanly. The FIFO gate holds startup open.
 #[cfg(unix)]
 #[test]
 fn test_cli_daemon_shutdown_during_startup_exits_cleanly() {

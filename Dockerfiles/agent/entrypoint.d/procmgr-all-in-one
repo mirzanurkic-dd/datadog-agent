@@ -2,16 +2,9 @@
 # Runs the cont-init scripts, then execs dd-procmgrd. _default reaches this when ENTRYPOINT is unset.
 set -euo pipefail
 
-# Stage executable copies: entries are mode 0644, often symlinks into a read-only ..data
-# directory, and executing them fails on a noexec mount. Try /var/run/s6 first. It is a VOLUME
-# kept across restarts, so it is wiped and mkdir without -p proves this run created it.
-# Otherwise use ${TMPDIR:-/tmp}, then /opt/datadog-agent/run, which may be shared: plain
-# --read-only leaves /tmp read-only and --tmpfs /tmp defaults to noexec. /tmp comes first so a
-# SIGKILL leftover stays in the container's own /tmp. bash as PID 1 ignores an unhandled
-# SIGTERM, so TERM is caught for the whole script. Each cont-init script runs in its own
-# session, so that signal reaches children it forked. A fallback directory is removed on the
-# way out, including when exec of dd-procmgrd fails. A custom-service fallback that survives
-# exec is removed by dd-procmgrd after the children stop.
+# Executable copies are staged in the first directory that allows exec. /var/run/s6 is a VOLUME
+# kept across restarts, so it is wiped first. /opt/datadog-agent/run may be shared, so it is
+# the last fallback. bash as PID 1 ignores an unhandled SIGTERM, so TERM is trapped throughout.
 stage_executes() {
     local probe="$1/.procmgr-exec-probe" status=1
     if printf '#!/bin/sh\nexit 0\n' >"$probe" && chmod 0755 "$probe" && "$probe" 2>/dev/null; then
@@ -32,8 +25,7 @@ launching=
 stop_requested=
 cleanup_dir=
 on_term() {
-    # Bash runs this trap between commands. launching is set only across the background
-    # launch and the pid assignment, where the child exists but $! is not stored yet.
+    # launching covers the gap between starting the child and storing $!.
     if [[ -n "$launching" ]]; then
         stop_requested=1
         return
@@ -41,21 +33,19 @@ on_term() {
     if [[ -n "$cont_init_pid" ]]; then
         # Ignore further TERM and INT. Each one would re-run this handler and start another watchdog.
         trap "" TERM INT
-        # Once setsid has run, the pid is the session leader and a negative pid signals the
-        # whole group. Before that the group does not exist yet, so signal the pid itself.
+        # Before setsid the group does not exist yet, so fall back to the pid.
         kill -TERM -"$cont_init_pid" 2>/dev/null || kill -TERM "$cont_init_pid" 2>/dev/null || true
-        # A script that ignores TERM would hold the container until Docker's own stop timeout,
-        # which ends it with 137 and skips the fallback cleanup. After 5 seconds, SIGKILL the group.
-        # The subshell closes its own standard streams, so a leftover sleep does not hold the log pipes.
+        # A TERM-ignoring script would otherwise hold the container until Docker's timeout,
+        # which skips the fallback cleanup. SIGKILL the group after 5 seconds.
+        # The subshell drops its standard streams so a leftover sleep does not hold the log pipes.
         (
             sleep 5
             kill -KILL -"$cont_init_pid" 2>/dev/null || kill -KILL "$cont_init_pid" 2>/dev/null || true
         ) </dev/null >/dev/null 2>&1 &
         watchdog=$!
         wait "$cont_init_pid" 2>/dev/null || true
-        # wait reaps only the script. A grandchild that ignores TERM stays in the group, so keep
-        # the watchdog until the group is empty. The SIGKILL above ends this loop. Before setsid
-        # the group does not exist, and the first check fails.
+        # wait reaps only the script. Keep the watchdog until the group is empty, since a
+        # grandchild may ignore TERM.
         while kill -0 -"$cont_init_pid" 2>/dev/null; do
             sleep 0.2
         done
@@ -114,12 +104,8 @@ for init in "${inits[@]}"; do
 done
 for init in "${selected[@]}"; do
     printf '===== RUNNING %s =====\n' "$init"
-    # setsid makes the script a session leader. Background it so the TERM handler runs
-    # while it blocks. <&0 keeps its stdin. Job control stays off, so setsid does not fork.
-    # launching stays set until $! is stored, so a TERM in that gap is applied to this pid.
-    # S6_KEEP_ENV=1 makes #!/usr/bin/with-contenv hooks use the inherited environment. Without it
-    # they read /var/run/s6/container_environment, which only s6 /init creates. It is set on the
-    # child only, so this shell and dd-procmgrd keep the caller's value.
+    # Backgrounded so the TERM handler runs while the script blocks. setsid makes it a session
+    # leader. S6_KEEP_ENV=1 lets #!/usr/bin/with-contenv hooks see the inherited environment.
     launching=1
     S6_KEEP_ENV=1 setsid "$copy_dir/${init##*/}" <&0 &
     cont_init_pid=$!
@@ -134,10 +120,8 @@ done
 # A custom-service fallback is set afterwards and must survive exec.
 if [[ "$copy_dir" != "$primary" ]]; then rm -rf "$copy_dir"; cleanup_dir=""; fi
 
-# Shipped directories are already in the aio catalog, so starting them again would run
-# each process twice. Other directories with a run file are custom services. finish is not
-# run because it calls s6-svc. A down file in a shipped directory keeps its catalog process
-# stopped at start, as it did under s6, so the staged catalog copy is edited below.
+# Shipped directories are already in the aio catalog, so they are not started again. A down
+# file in one keeps its catalog process stopped, so the staged catalog copy is edited below.
 shipped_s6_services=" agent data-plane otel privateactionrunner process security sysprobe trace "
 # Catalog files behind each shipped service. Keep in step with processes.d/aio.
 shipped_catalog_files() {
@@ -251,8 +235,7 @@ if [[ ${#custom_services[@]} -gt 0 || ${#shipped_down[@]} -gt 0 ]]; then
             echo "/etc/services.d/$service_name/finish is not run. ENTRYPOINT=s6-all-in-one runs it." >&2
         fi
         printf '===== ADDING custom service /etc/services.d/%s =====\n' "$service_name"
-        # The placeholder is not expanded here. The backslash keeps bash from expanding it when the
-        # file is written. dd-procmgrd expands it once at spawn, to the staging directory.
+        # The escaped placeholders stay literal in the file. dd-procmgrd expands them at spawn.
         cat >"$processes_dir/$service_name.yaml" <<EOF
 description: Custom service /etc/services.d/$service_name
 command: '\${DD_PM_CONFIG_DIR}/services/$service_name/run'
@@ -272,9 +255,7 @@ EOF
 fi
 # The image VOLUME keeps this directory writable under Docker --read-only.
 export DD_PM_SOCKET_PATH="${DD_PM_SOCKET_PATH:-/opt/datadog-agent/run/dd-procmgrd.sock}"
-# Only the fallback directory this start created. Unset a caller-supplied path and token so
-# the daemon cannot remove some other directory. The token file is what ties the path to
-# this launch. Children do not inherit DD_PM_*.
+# Clear caller-supplied cleanup values so the daemon can only remove the fallback created here.
 unset DD_PM_CLEANUP_DIR
 unset DD_PM_CLEANUP_TOKEN
 if [[ -n "$cleanup_dir" ]]; then

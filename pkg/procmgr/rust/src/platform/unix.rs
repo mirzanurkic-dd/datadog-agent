@@ -88,9 +88,8 @@ pub fn stderr_inheritable() -> bool {
 
 /// Wait for a shutdown trigger (SIGTERM or SIGINT).
 ///
-/// The handlers are installed when this is called, not on the first poll of the returned
-/// future. As PID 1 the daemon ignores an unhandled SIGTERM, so a signal sent before the
-/// first poll would otherwise be lost.
+/// Handlers install on this call, not on the first poll: as PID 1 the daemon ignores an
+/// unhandled SIGTERM, so an earlier signal would be lost.
 pub fn shutdown_signal() -> impl std::future::Future<Output = ()> {
     use tokio::signal::unix::{SignalKind, signal};
     let mut sigterm = signal(SignalKind::terminate()).expect("failed to register SIGTERM handler");

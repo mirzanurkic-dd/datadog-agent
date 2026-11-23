@@ -10,25 +10,20 @@ upgrade:
   - |
     The Linux Agent container now runs its processes under ``dd-procmgrd``
     instead of s6. If the core Agent exits, the container now exits with the
-    Agent's exit code instead of 0. Only enabled processes start. An auxiliary
-    process that crashes restarts after 2 seconds, and the delay doubles up to
-    60 seconds while it keeps exiting within 1 second of starting. ``datadog-agent-otel``
-    still restarts every 2 seconds. Under s6, every crash restart waited 2 seconds. A custom
-    service added under ``/etc/services.d/`` still starts. It is not started
-    when its name is not a process name or matches a catalog process. Its
-    ``finish`` script does not run, and editing a shipped service's ``run``
-    file has no effect. A ``down`` file in a shipped service directory keeps
-    its catalog process stopped at start until ``dd-procmgr start <process>``,
-    for example ``datadog-agent-trace``. The ``privateactionrunner`` directory
-    covers ``datadog-agent-par`` and ``datadog-agent-par-control``. The
-    ``agent`` directory is the exception, since the core Agent always starts.
-    Scripts in ``/etc/cont-init.d/``
-    still run but need a shebang. Scripts in ``/etc/cont-finish.d/`` and
-    ``/etc/fix-attrs.d/`` do not run. ``S6_*`` variables do not control
-    supervision. ``s6-svc`` and ``s6-svstat`` do not control ``dd-procmgrd``.
-    ``dd-procmgr`` replaces them. ``DD_PM_*`` variables are
-    not passed to the processes, except ``DD_PM_SOCKET_PATH``. Start, exit, and
-    restart messages stay in the container output and are no longer appended to
-    ``/var/log/datadog/init.log``. They are worded differently. To keep s6
-    for this release, set the environment variable ``ENTRYPOINT=s6-all-in-one``.
-    s6 will be removed in a future release.
+    Agent's exit code instead of 0. Only enabled processes start. A crashed
+    process restarts after 2 seconds, and the delay doubles up to 60 seconds
+    while it keeps exiting within 1 second of starting. Under s6, every crash
+    restart waited 2 seconds. Custom services under ``/etc/services.d/`` still
+    start, but a service whose name is not a process name or matches a catalog
+    process does not. Their ``finish`` scripts do not run, and editing a shipped
+    service's ``run`` file has no effect. A ``down`` file in a shipped service
+    directory keeps its catalog process stopped at start until
+    ``dd-procmgr start <process>``, except ``agent``, which always starts.
+    Scripts in ``/etc/cont-init.d/`` still run but need a shebang. Scripts in
+    ``/etc/cont-finish.d/`` and ``/etc/fix-attrs.d/`` do not run. ``S6_*``
+    variables do not control supervision, and ``s6-svc`` and ``s6-svstat`` do
+    not control ``dd-procmgrd``. ``DD_PM_*`` variables are not passed to the
+    processes, except ``DD_PM_SOCKET_PATH``. Process start and restart messages
+    are no longer appended to ``/var/log/datadog/init.log``. To keep s6 for this
+    release, set the environment variable ``ENTRYPOINT=s6-all-in-one``. s6 will
+    be removed in a future release.

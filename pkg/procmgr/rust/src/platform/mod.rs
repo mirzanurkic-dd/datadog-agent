@@ -41,13 +41,9 @@ const STARTUP_STAGING_PREFIX: &str = "procmgr-processes.d.";
 #[cfg(unix)]
 const STAGING_TOKEN_FILE: &str = ".dd-procmgr-cleanup";
 
-/// Remove `DD_PM_CLEANUP_DIR` after the children have stopped.
-///
-/// The entrypoint sets that variable to the one fallback directory this start
-/// created, and `DD_PM_CLEANUP_TOKEN` to the token it wrote into that directory.
-/// Removal also requires the directory to be owned by this process. A stale path
-/// or a directory owned by someone else is left in place. Only the Linux
-/// container entrypoint sets the variables, so other platforms do nothing.
+/// Remove `DD_PM_CLEANUP_DIR` after the children have stopped. The entrypoint sets it,
+/// with `DD_PM_CLEANUP_TOKEN`, only for a fallback directory this start created. Other
+/// platforms do nothing.
 #[cfg(unix)]
 pub fn remove_startup_staging_dir() {
     let Ok(raw) = std::env::var("DD_PM_CLEANUP_DIR") else {

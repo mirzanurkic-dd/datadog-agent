@@ -658,8 +658,7 @@ fn aio_directory_keeps_par_beside_the_new_catalog() {
 fn procmgr_all_in_one_entrypoint_runs_cont_init_then_dd_procmgrd() {
     let script = ENTRYPOINT_PROCMGR_ALL_IN_ONE;
     assert!(script.contains("set -euo pipefail"));
-    // s6 runs every regular file by its shebang. The entrypoint stages executable
-    // copies because shipped and customer scripts are mode 0644.
+    // The entrypoint stages executable copies, since shipped scripts are mode 0644.
     assert!(
         !script.contains("/etc/cont-init.d/*.sh"),
         "a .sh-only glob skips customer scripts that have another suffix"
@@ -693,12 +692,10 @@ fn procmgr_all_in_one_entrypoint_runs_cont_init_then_dd_procmgrd() {
         [mapfile_line],
         "LC_ALL is only the sort prefix, so dd-procmgrd does not inherit it"
     );
-    // The loops are compared as one contiguous slice, so the generic fi and done lines
-    // stay attached to the bodies they close.
+    // Compare each loop as one contiguous slice, so generic `fi` and `done` lines stay attached.
     let staging_cleanup =
         r#"if [[ "$copy_dir" != "$primary" ]]; then rm -rf "$copy_dir"; cleanup_dir=""; fi"#;
-    // Unique lines only: pos() returns the first match, so a repeated `fi` would not
-    // prove order.
+    // Use unique lines only: pos() returns the first match.
     let steps = [
         "stage_executes() {",
         r#"local probe="$1/.procmgr-exec-probe" status=1"#,
@@ -744,7 +741,7 @@ fn procmgr_all_in_one_entrypoint_runs_cont_init_then_dd_procmgrd() {
             steps[index + 1]
         );
     }
-    // The handler is one slice. Its `fi` and `)` lines are not unique in the script.
+    // The handler is one slice, since its `fi` and `)` lines are not unique.
     let on_term_block = [
         "on_term() {",
         r#"if [[ -n "$launching" ]]; then"#,
@@ -828,8 +825,7 @@ fn procmgr_all_in_one_entrypoint_runs_cont_init_then_dd_procmgrd() {
         !script.contains("procmgr-processes.d.*"),
         "a glob would delete another container's live custom-service directory on a shared mount"
     );
-    // A failed exec must return so the EXIT trap can remove the fallback directory. These
-    // are the script's last code lines, in order.
+    // A failed exec must return so the EXIT trap can remove the fallback directory.
     let expected_tail = [
         "set +e",
         "shopt -s execfail",
@@ -892,8 +888,7 @@ fn procmgr_all_in_one_entrypoint_runs_cont_init_then_dd_procmgrd() {
 #[test]
 fn procmgr_all_in_one_custom_services_keep_the_config_dir_placeholder() {
     let script = ENTRYPOINT_PROCMGR_ALL_IN_ONE;
-    // The heredoc is unquoted, so the backslash is what keeps the placeholder in the file.
-    // Without it, bash expands the variable at write time to the catalog directory.
+    // The heredoc is unquoted, so the backslash keeps the placeholder literal in the file.
     assert!(
         script.contains(r"command: '\${DD_PM_CONFIG_DIR}/services/$service_name/run'"),
         "the generated command must keep the escaped placeholder"
@@ -927,9 +922,7 @@ fn procmgr_all_in_one_custom_services_keep_the_config_dir_placeholder() {
         ),
         "a custom service must not replace a .yml catalog process of the same name"
     );
-    // A relative TMPDIR makes mktemp return a relative path, which a service started in its own
-    // directory cannot execute and the cleanup check rejects. The path is resolved physically
-    // right after mktemp and before cleanup_dir or processes_dir take it.
+    // A relative TMPDIR gives a relative path, so resolve it physically right after mktemp.
     let at = |needle: &str| {
         script
             .find(needle)
@@ -947,10 +940,7 @@ fn procmgr_all_in_one_custom_services_keep_the_config_dir_placeholder() {
         mktemp < resolve && resolve < adopt && adopt < track,
         "resolve the custom-service staging path before cleanup_dir uses it"
     );
-    // When S6_KEEP_ENV is 0, a #!/usr/bin/with-contenv run script reads
-    // /var/run/s6/container_environment, which only s6 /init creates. The service gets the value
-    // in its own env, which wins over the inherited one. An export before dd-procmgrd would
-    // change every supervised process.
+    // Set S6_KEEP_ENV on the service only. An export before dd-procmgrd affects every process.
     assert!(
         script.contains("stderr: inherit\nenv:\n  S6_KEEP_ENV: \"1\"\nEOF\n"),
         "the generated custom-service YAML must set S6_KEEP_ENV to the string \"1\""
@@ -976,8 +966,7 @@ fn split_entrypoint_leaves_the_ipc_cert_path_to_dd_procmgrd() {
 #[test]
 fn procmgr_all_in_one_keeps_shipped_down_markers() {
     let script = ENTRYPOINT_PROCMGR_ALL_IN_ONE;
-    // A down file in a shipped directory keeps its catalog process stopped at start, as under
-    // s6. The staged catalog copy is the only place that can be edited.
+    // The staged catalog copy is the only place a shipped down marker can take effect.
     assert!(script.contains("shipped_down+=(\"$service_name\")"));
     assert!(script.contains("${#shipped_down[@]} -gt 0"));
     assert!(script.contains("trace) echo datadog-agent-trace.yaml ;;"));
@@ -999,8 +988,7 @@ fn procmgr_all_in_one_shipped_down_mappings_match_catalog() {
                 .strip_suffix('"')
         })
         .expect("shipped_s6_services is defined");
-    // Every shipped service except the Agent needs an arm, and the staged copy of each mapped
-    // catalog file needs exactly one plain auto_start line for the down edit to apply.
+    // Each shipped service except the Agent needs an arm, and each mapped file needs one plain auto_start line.
     for name in shipped.split_whitespace().filter(|name| *name != "agent") {
         let arm = script
             .lines()
@@ -1041,8 +1029,7 @@ fn default_entrypoint_execs_procmgr_all_in_one() {
         ENTRYPOINT_DEFAULT.contains("-f /opt/datadog-agent/processes.d/aio/.procmgr-default"),
         "_default must require the catalog marker before selecting procmgr"
     );
-    // The marker is not YAML, so the catalog scan does not see it. Including it here
-    // fails the build if the file is removed.
+    // The marker is not YAML, so include it here to fail the build if it is removed.
     let _marker: &str =
         include_str!("../../../../Dockerfiles/agent/processes.d/aio/.procmgr-default");
     assert_eq!(

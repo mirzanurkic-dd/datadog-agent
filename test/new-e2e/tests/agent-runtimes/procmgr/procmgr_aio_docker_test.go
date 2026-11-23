@@ -29,8 +29,7 @@ const (
 	aioStopTimeoutSec = "120"
 	// Any non-empty value passes 01-check-apikey.sh.
 	aioThrowawayAPIKey = "0123456789abcdef0123456789abcdef"
-	// A bare docker run has no hostname source (no docker.sock, own UTS namespace), so without
-	// DD_HOSTNAME the core agent exits and takes the container down.
+	// A bare docker run has no hostname source, so the core agent needs DD_HOSTNAME.
 	aioBareHostname = "aio-bare-container"
 
 	aioContInitMarker90 = "cont-init-marker-90-bash-sh"
@@ -72,9 +71,8 @@ printf '%s\n' "$dir"
 EOS
 `
 
-// aioCustomServiceSetupScript writes a run script that stays up and prints its
-// working directory, its own path, and a sibling file. The entrypoint runs a
-// staged copy of the directory, so those paths are under services/<name>.
+// aioCustomServiceSetupScript writes a run script that prints its paths. The entrypoint runs
+// a staged copy, so those paths are under services/<name>.
 const aioCustomServiceSetupScript = `bash -s <<'EOS'
 set -euo pipefail
 dir=$(mktemp -d)
@@ -293,10 +291,7 @@ func (s *procmgrAIODockerSuite) TestCustomContInitRunsNonShAndSymlink() {
 	}, 2*time.Minute, 2*time.Second)
 }
 
-// A hook with the s6 with-contenv shebang reads /var/run/s6/container_environment when
-// S6_KEEP_ENV is 0, and only s6 /init creates it. The entrypoint runs hooks with
-// S6_KEEP_ENV=1, so the hook starts and sees the container environment. Without that, the
-// hook fails and the container exits before dd-procmgrd starts.
+// The with-contenv shebang needs S6_KEEP_ENV=1, or the hook fails before dd-procmgrd starts.
 func (s *procmgrAIODockerSuite) TestContInitWithContenvHookRunsWhenS6KeepEnvIsZero() {
 	image := s.agentImage(s.T())
 	name := "aio-cont-init-with-contenv"
@@ -392,10 +387,7 @@ func (s *procmgrAIODockerSuite) TestCustomServiceStarts() {
 	}, time.Minute, 2*time.Second)
 }
 
-// A service run script with the s6 with-contenv shebang reads /var/run/s6/container_environment
-// when S6_KEEP_ENV is 0, and only s6 /init creates it. The generated service sets
-// S6_KEEP_ENV=1 in its own environment, so the script starts, sees the container environment,
-// and stays up. Without that, the script fails and restarts every second.
+// The generated service sets S6_KEEP_ENV=1, or its with-contenv run script fails and restarts.
 func (s *procmgrAIODockerSuite) TestCustomServiceWithContenvRunsWhenS6KeepEnvIsZero() {
 	const service = "custom-with-contenv"
 	dir := strings.TrimSpace(s.Env().RemoteHost.MustExecute(`bash -s <<'EOS'
@@ -460,7 +452,7 @@ EOS
 		assert.NotEmpty(c, pid)
 	}, 2*time.Minute, 2*time.Second)
 
-	// restart_sec is 1 second, so a failing script would restart within this window.
+	// A failing script would restart within this window.
 	require.Never(t, func() bool {
 		stdout, _, err := s.Env().Docker.Client.ExecuteCommandStdoutStdErr(
 			name,
@@ -470,7 +462,7 @@ EOS
 	}, 5*time.Second, 500*time.Millisecond, "the with-contenv service must not restart")
 }
 
-// UID 100 is dd-agent. Group 0 is root, which can write to the group-writable runtime directories.
+// UID 100 is dd-agent. Group 0 is root, which owns the group-writable runtime directories.
 func (s *procmgrAIODockerSuite) TestNonRootUserRunsProcmgr() {
 	image := s.agentImage(s.T())
 	name := "aio-nonroot"
@@ -501,9 +493,8 @@ func (s *procmgrAIODockerSuite) TestNonRootUserRunsProcmgr() {
 	}, 3*time.Minute, 2*time.Second)
 }
 
-// The blocking script writes script.ready before it sleeps. The RUNNING line is printed
-// before setsid, so the stop waits for the marker. Exit 143 means the TERM handler ran.
-// Exit 137 means Docker's grace period expired.
+// The script writes script.ready before it sleeps, so the stop waits for it. Exit 143 means the
+// TERM handler ran. Exit 137 means Docker's grace period expired.
 func (s *procmgrAIODockerSuite) TestDockerStopDuringContInit() {
 	image := s.agentImage(s.T())
 	name := "aio-stop-during-cont-init"
@@ -551,10 +542,7 @@ EOS
 	s.Equal("143", exitCode, "docker stop during cont-init should exit 143, not 137")
 }
 
-// The entrypoint sends SIGTERM to the cont-init script's process group, so a child the
-// script forked gets TERM too. The child writes a marker from its TERM trap, and the
-// script waits for it before exiting. Without the group signal, the child never sees
-// TERM and the marker is missing.
+// The entrypoint signals the script's process group, so a forked child gets TERM too.
 func (s *procmgrAIODockerSuite) TestDockerStopDuringContInitKillsForkedChild() {
 	image := s.agentImage(s.T())
 	name := "aio-stop-during-cont-init-fork"
@@ -606,9 +594,8 @@ EOS
 	s.Equal("term", strings.TrimSpace(term), "the forked child should receive SIGTERM from the cont-init process group")
 }
 
-// The script exits on TERM and leaves a child that ignores it. The entrypoint has to keep the
-// 5 second SIGKILL watchdog until that process group is empty. A stop well under 4 seconds means
-// the watchdog was cancelled when the script exited. Exit 137 means Docker's own timeout won.
+// The entrypoint keeps the 5 second SIGKILL watchdog until the group is empty. Exit 137 means
+// Docker's own timeout won.
 func (s *procmgrAIODockerSuite) TestDockerStopDuringContInitKillsTermIgnoringChild() {
 	image := s.agentImage(s.T())
 	name := "aio-stop-during-cont-init-ignore"
