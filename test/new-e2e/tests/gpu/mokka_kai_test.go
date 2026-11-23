@@ -18,6 +18,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 
+	"github.com/DataDog/datadog-agent/comp/core/tagger/tags"
 	"github.com/DataDog/datadog-agent/test/e2e-framework/components/kubernetes/kaischeduler"
 	"github.com/DataDog/datadog-agent/test/e2e-framework/scenarios/aws/ec2"
 	"github.com/DataDog/datadog-agent/test/e2e-framework/scenarios/aws/kindvm"
@@ -90,7 +91,7 @@ func (s *gpuMokkaKAISuite) TestKAIJobTags() {
 						Name: "work",
 						// Not pause: the Agent excludes pause containers from container metrics.
 						// busybox is statically linked, so the LD_PRELOAD Mokka injects does not affect it.
-						Image:   "busybox:1.36",
+						Image:   busyboxImage(),
 						Command: []string{"sleep", "3600"},
 						Resources: corev1.ResourceRequirements{
 							Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")},
@@ -122,18 +123,21 @@ func (s *gpuMokkaKAISuite) TestKAIJobTags() {
 
 	expectedTags := []string{
 		"pod_name:" + podName,
-		"kube_namespace:" + kaiWorkloadNamespace,
-		"kube_scheduler:kai",
-		"kube_scheduler_queue:" + kaiTestQueue,
-		"kai_queue:" + kaiTestQueue,
+		tags.KubeNamespace + ":" + kaiWorkloadNamespace,
+		tags.Scheduler + ":kai",
+		tags.SchedulerQueue + ":" + kaiTestQueue,
+		tags.KAIQueue + ":" + kaiTestQueue,
 	}
 
 	s.Run("container metrics", func() {
 		s.EventuallyWithT(func(c *assert.CollectT) {
 			metrics, err := s.Env().FakeIntake.Client().FilterMetrics("container.memory.usage", client.WithTags[*aggregator.MetricSeries](expectedTags))
-			if assert.NoError(c, err) && assert.NotEmpty(c, metrics, "no container.memory.usage with tags %v", expectedTags) {
-				assertSchedulerWorkloadTags(c, metrics[0].GetTags())
+			if !assert.NoError(c, err) || !assert.NotEmpty(c, metrics, "no container.memory.usage with tags %v", expectedTags) {
+				return
 			}
+			// The PodGroup reaches the node Agent after the pod starts, so the first series of the
+			// pod only have the queue tags. fakeintake keeps them all: look for one with the PodGroup.
+			assertSchedulerWorkloadTags(c, metrics)
 		}, 5*time.Minute, 10*time.Second)
 	})
 
@@ -145,7 +149,6 @@ func (s *gpuMokkaKAISuite) TestKAIJobTags() {
 			}
 			uuids := make(map[string]struct{})
 			for _, metric := range metrics {
-				assertSchedulerWorkloadTags(c, metric.GetTags())
 				for _, tag := range metric.GetTags() {
 					if strings.HasPrefix(tag, "gpu_uuid:") {
 						uuids[tag] = struct{}{}
@@ -153,22 +156,24 @@ func (s *gpuMokkaKAISuite) TestKAIJobTags() {
 				}
 			}
 			assert.Len(c, uuids, 1, "the job requested one GPU, but its tags are on the metrics of %v", uuids)
+			assertSchedulerWorkloadTags(c, metrics)
 		}, 5*time.Minute, 10*time.Second)
 	})
 }
 
-// assertSchedulerWorkloadTags checks that the generic scheduler workload tag and the KAI PodGroup
-// tag are both set, and name the same PodGroup.
-func assertSchedulerWorkloadTags(c *assert.CollectT, tags []string) {
-	var workload, podGroup string
-	for _, tag := range tags {
-		if v, ok := strings.CutPrefix(tag, "kube_scheduler_workload:"); ok {
-			workload = v
-		}
-		if v, ok := strings.CutPrefix(tag, "kai_pod_group:"); ok {
-			podGroup = v
+// assertSchedulerWorkloadTags checks that at least one of the series carries both the generic
+// scheduler workload tag and the KAI PodGroup tag, naming the same PodGroup. Series from before
+// the PodGroup reached the node Agent only have the queue tags and are ignored.
+func assertSchedulerWorkloadTags(c *assert.CollectT, metrics []*aggregator.MetricSeries) {
+	for _, metric := range metrics {
+		workload := tagValue(metric.GetTags(), tags.SchedulerWorkload)
+		if workload != "" && workload == tagValue(metric.GetTags(), tags.KAIPodGroup) {
+			return
 		}
 	}
-	assert.NotEmpty(c, workload, "missing kube_scheduler_workload tag in %v", tags)
-	assert.Equal(c, workload, podGroup, "kube_scheduler_workload and kai_pod_group should name the same PodGroup, tags: %v", tags)
+	seen := make([][]string, 0, len(metrics))
+	for _, metric := range metrics {
+		seen = append(seen, metric.GetTags())
+	}
+	assert.Fail(c, "no series with matching "+tags.SchedulerWorkload+" and "+tags.KAIPodGroup+" tags", "series tags: %v", seen)
 }

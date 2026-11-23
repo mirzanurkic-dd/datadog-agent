@@ -69,6 +69,7 @@ dd_agent_go_test(
     embed = [":gpu"],
     tags = ["manual"],
     deps = [
+        "//comp/core/tagger/tags",
         "//pkg/util/testutil/flake",
         "//test/e2e-framework/components/kubernetes/kaischeduler",
         "//test/e2e-framework/components/os",
