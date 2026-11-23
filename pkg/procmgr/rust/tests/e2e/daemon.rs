@@ -3,9 +3,11 @@
 // This product includes software developed at Datadog (https://www.datadoghq.com/).
 // Copyright 2026-present Datadog, Inc.
 
-use crate::helpers::{StatusProcessesCount, TestEnv, pid_is_alive, wait_for_pid_gone};
+use crate::helpers::{
+    DaemonHandle, StatusProcessesCount, TestEnv, pid_is_alive, wait_for_pid_gone,
+};
 use dd_procmgrd::test_helpers;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[test]
 fn daemon_starts_ready() {
@@ -70,6 +72,70 @@ fn test_cli_daemon_shutdown_stops_children() {
         wait_for_pid_gone(pid, Duration::from_secs(5)),
         "child PID {pid} should be gone after daemon shutdown"
     );
+}
+
+/// A SIGTERM sent while the catalog is still starting must end the daemon cleanly, not kill
+/// it. The process gate reads a FIFO, so the daemon blocks in startup once its socket is up.
+#[cfg(unix)]
+#[test]
+fn test_cli_daemon_shutdown_during_startup_exits_cleanly() {
+    use nix::sys::signal::Signal;
+    use std::os::unix::process::ExitStatusExt;
+
+    let env = TestEnv::new();
+    let gate = env.env_root().join("gate.fifo");
+    let gate_c = std::ffi::CString::new(gate.to_str().expect("utf-8 path")).expect("no NUL");
+    assert_eq!(
+        unsafe { libc::mkfifo(gate_c.as_ptr(), 0o600) },
+        0,
+        "mkfifo failed"
+    );
+    let env = env.with_config(
+        "gated",
+        &format!(
+            "command: /usr/bin/true\nauto_start: true\ncondition_config_any:\n  - path: {}\n    keys:\n      - apm_config.enabled\n",
+            gate.display()
+        ),
+    );
+    // A helper thread opens the FIFO for writing. The blocking open returns once the daemon
+    // opens it for reading, and the daemon's gate read then waits until the thread drops the
+    // writer. Dropping it early would leave a daemon that has not opened yet blocked forever.
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let writer_path = gate.clone();
+    std::thread::spawn(move || {
+        let writer = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&writer_path)
+            .expect("open gate fifo for writing");
+        let _ = release_rx.recv();
+        drop(writer);
+    });
+    let socket = env.env_root().join("daemon.sock");
+    let mut daemon = DaemonHandle::start(env.config_dir(), &socket);
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !socket.exists() {
+        assert!(Instant::now() < deadline, "daemon socket never appeared");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    daemon.send_signal(Signal::SIGTERM);
+    // Give the signal time to land while start() is still blocked on the gate.
+    std::thread::sleep(Duration::from_millis(200));
+    if let Some(status) = daemon.try_exit_status() {
+        panic!("daemon exited before the gate was released: {status:?}");
+    }
+    // Closing the writer gives the daemon EOF, so the gate resolves and startup finishes.
+    let _ = release_tx.send(());
+
+    let status = daemon
+        .wait_for_exit(Duration::from_secs(10))
+        .expect("daemon did not exit after SIGTERM during startup");
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "daemon should exit 0, got {status:?}"
+    );
+    assert_eq!(status.signal(), None, "daemon was killed by a signal");
 }
 
 #[cfg(unix)]

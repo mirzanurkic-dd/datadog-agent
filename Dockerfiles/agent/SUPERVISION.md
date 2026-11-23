@@ -94,7 +94,11 @@ copies the whole service directory and runs that copy. The working directory is 
 copy, not `/etc/services.d/<name>`. The service uses `restart: always`, so it restarts 1
 second after every exit, including exit 0, with no limit. A `down` file leaves it stopped
 until `dd-procmgr start <name>`. The shipped directories are already in the catalog, so their
-`run` files are not started again.
+`run` files are not started again. A `down` file in a shipped directory keeps its catalog
+process stopped at start until `dd-procmgr start <process>`, where `<process>` is the catalog
+process name, such as `datadog-agent-trace`. The `privateactionrunner` directory covers both
+`datadog-agent-par` and `datadog-agent-par-control`. The Agent is the exception:
+`/etc/services.d/agent/down` is ignored with a warning, because the core Agent always starts.
 
 A custom service always runs with `S6_KEEP_ENV=1`, so a `run` script with a
 `#!/usr/bin/with-contenv` shebang sees the container environment even if you set

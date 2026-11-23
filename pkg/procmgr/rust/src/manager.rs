@@ -17,6 +17,7 @@ use crate::uuid_gen::UuidGenerator;
 use anyhow::Result;
 use log::{debug, info, warn};
 use std::collections::HashSet;
+use std::future::Future;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -132,6 +133,12 @@ impl ProcessManager {
     }
 
     pub async fn run(&self) -> Result<i32> {
+        self.run_with_shutdown(platform::shutdown_signal()).await
+    }
+
+    /// Runs until `shutdown` resolves. Create `shutdown` before [`ProcessManager::new`] to keep
+    /// a stop request that arrives while the catalog loads.
+    pub async fn run_with_shutdown(&self, shutdown: impl Future<Output = ()>) -> Result<i32> {
         let _reaper = platform::start_reaper();
         let (cmd_tx, mut cmd_rx) = mpsc::channel::<Command>(64);
         let (grpc_shutdown_tx, grpc_shutdown_rx) = oneshot::channel::<()>();
@@ -141,7 +148,6 @@ impl ProcessManager {
         let (restart_tx, mut restart_rx) = mpsc::channel::<String>(256);
         self.start(&exit_tx).await;
 
-        let shutdown = platform::shutdown_signal();
         tokio::pin!(shutdown);
 
         let mut external_shutdown = false;

@@ -974,6 +974,58 @@ fn split_entrypoint_leaves_the_ipc_cert_path_to_dd_procmgrd() {
 }
 
 #[test]
+fn procmgr_all_in_one_keeps_shipped_down_markers() {
+    let script = ENTRYPOINT_PROCMGR_ALL_IN_ONE;
+    // A down file in a shipped directory keeps its catalog process stopped at start, as under
+    // s6. The staged catalog copy is the only place that can be edited.
+    assert!(script.contains("shipped_down+=(\"$service_name\")"));
+    assert!(script.contains("${#shipped_down[@]} -gt 0"));
+    assert!(script.contains("trace) echo datadog-agent-trace.yaml ;;"));
+    assert!(script.contains(
+        "privateactionrunner) echo \"datadog-agent-par.yaml datadog-agent-par-control.yaml\" ;;"
+    ));
+    assert!(script.contains("sed -i 's/^auto_start: true$/auto_start: false/' \"$target\""));
+    // The Agent cannot be stopped this way, so its marker is ignored with a warning.
+    assert!(script.contains("ignoring /etc/services.d/agent/down"));
+}
+
+#[test]
+fn procmgr_all_in_one_shipped_down_mappings_match_catalog() {
+    let script = ENTRYPOINT_PROCMGR_ALL_IN_ONE;
+    let shipped = script
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("shipped_s6_services=\" ")?
+                .strip_suffix('"')
+        })
+        .expect("shipped_s6_services is defined");
+    // Every shipped service except the Agent needs an arm, and the staged copy of each mapped
+    // catalog file needs exactly one plain auto_start line for the down edit to apply.
+    for name in shipped.split_whitespace().filter(|name| *name != "agent") {
+        let arm = script
+            .lines()
+            .map(str::trim_start)
+            .find_map(|line| line.strip_prefix(&format!("{name}) echo ")))
+            .unwrap_or_else(|| panic!("no shipped_catalog_files arm for {name}"));
+        let files = arm.trim_end_matches(";;").trim().trim_matches('"');
+        for file in files.split_whitespace() {
+            let (_, yaml) = CATALOG
+                .iter()
+                .find(|(catalog_name, _)| *catalog_name == file)
+                .unwrap_or_else(|| panic!("{file} is mapped for {name} but not in CATALOG"));
+            let count = yaml
+                .lines()
+                .filter(|line| *line == "auto_start: true")
+                .count();
+            assert_eq!(
+                count, 1,
+                "{file} needs exactly one plain `auto_start: true` line for the down edit"
+            );
+        }
+    }
+}
+
+#[test]
 fn default_entrypoint_execs_procmgr_all_in_one() {
     assert!(
         ENTRYPOINT_DEFAULT

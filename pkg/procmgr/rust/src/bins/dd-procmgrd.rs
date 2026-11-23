@@ -34,6 +34,7 @@ fn run() -> anyhow::Result<i32> {
 fn run() -> anyhow::Result<i32> {
     use dd_procmgrd::config::YamlConfigLoader;
     use dd_procmgrd::manager::ProcessManager;
+    use dd_procmgrd::platform;
     use dd_procmgrd::uuid_gen::V4UuidGenerator;
     use log::info;
     use std::sync::Arc;
@@ -47,8 +48,10 @@ fn run() -> anyhow::Result<i32> {
 
     let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(async {
+        // Installed before the catalog loads, so a stop sent during that load is kept.
+        let shutdown = platform::shutdown_signal();
         let loader = Arc::new(YamlConfigLoader::from_env());
         let mgr = ProcessManager::new(loader, Arc::new(V4UuidGenerator));
-        mgr.run().await
+        mgr.run_with_shutdown(shutdown).await
     })
 }

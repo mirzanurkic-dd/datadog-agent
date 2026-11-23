@@ -17,7 +17,12 @@ upgrade:
     service added under ``/etc/services.d/`` still starts. It is not started
     when its name is not a process name or matches a catalog process. Its
     ``finish`` script does not run, and editing a shipped service's ``run``
-    file has no effect. Scripts in ``/etc/cont-init.d/``
+    file has no effect. A ``down`` file in a shipped service directory keeps
+    its catalog process stopped at start until ``dd-procmgr start <process>``,
+    for example ``datadog-agent-trace``. The ``privateactionrunner`` directory
+    covers ``datadog-agent-par`` and ``datadog-agent-par-control``. The
+    ``agent`` directory is the exception, since the core Agent always starts.
+    Scripts in ``/etc/cont-init.d/``
     still run but need a shebang. Scripts in ``/etc/cont-finish.d/`` and
     ``/etc/fix-attrs.d/`` do not run. ``S6_*`` variables do not control
     supervision. ``s6-svc`` and ``s6-svstat`` do not control ``dd-procmgrd``.
