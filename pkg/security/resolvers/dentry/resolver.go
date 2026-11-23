@@ -70,11 +70,15 @@ func (ce *counterEntry) Tags() []string {
 	return []string{ce.resolutionType, ce.resolution, "caller:" + string(ce.caller)}
 }
 
+type pathnamesMap interface {
+	Lookup(key, valueOut interface{}) error
+}
+
 // Resolver resolves inode/mountID to full paths
 type Resolver struct {
 	config                *config.Config
 	statsdClient          statsd.ClientInterface
-	pathnames             *lib.Map
+	pathnames             pathnamesMap
 	erpcStats             [2]*lib.Map
 	bufferSelector        *lib.Map
 	activeERPCStatsBuffer uint32
@@ -295,10 +299,12 @@ func (dr *Resolver) ResolveNameFromMap(pathKey model.PathKey, cache bool, caller
 func (dr *Resolver) ResolveName(pathKey model.PathKey, cache bool, caller Caller) string {
 	var (
 		name string
-		err  error
+		err  = ErrEntryNotFound
 	)
 
-	name, err = dr.ResolveNameFromCache(pathKey, caller)
+	if cache {
+		name, err = dr.ResolveNameFromCache(pathKey, caller)
+	}
 
 	if err != nil && dr.config.MapDentryResolutionEnabled {
 		name, _ = dr.ResolveNameFromMap(pathKey, cache, caller)
