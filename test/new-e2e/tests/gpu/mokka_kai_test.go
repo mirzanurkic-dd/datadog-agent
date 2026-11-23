@@ -91,7 +91,7 @@ func (s *gpuMokkaKAISuite) TestKAIJobTags() {
 						Name: "work",
 						// Not pause: the Agent excludes pause containers from container metrics.
 						// busybox is statically linked, so the LD_PRELOAD Mokka injects does not affect it.
-						Image:   busyboxImage(),
+						Image:   busyboxImage,
 						Command: []string{"sleep", "3600"},
 						Resources: corev1.ResourceRequirements{
 							Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")},
@@ -117,7 +117,7 @@ func (s *gpuMokkaKAISuite) TestKAIJobTags() {
 			return
 		}
 		pod := pods.Items[0]
-		assert.Equal(c, corev1.PodRunning, pod.Status.Phase, "KAI job pod is not running: %s %s", pod.Status.Reason, pod.Status.Message)
+		assert.Equal(c, corev1.PodRunning, pod.Status.Phase, "KAI job pod is not running: %s", podStartDiagnostics(ctx, kubeClient, &pod))
 		podName = pod.Name
 	}, 5*time.Minute, 5*time.Second, "KAI did not schedule the job on a mock GPU")
 
