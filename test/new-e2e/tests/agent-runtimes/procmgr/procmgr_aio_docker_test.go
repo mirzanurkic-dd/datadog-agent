@@ -462,6 +462,70 @@ EOS
 	}, 5*time.Second, 500*time.Millisecond, "the with-contenv service must not restart")
 }
 
+// A down file in a shipped service directory holds its catalog process at start. Only an
+// explicit dd-procmgr start runs it.
+func (s *procmgrAIODockerSuite) TestShippedDownMarkerKeepsProcessStopped() {
+	dir := strings.TrimSpace(s.Env().RemoteHost.MustExecute(`bash -s <<'EOS'
+set -euo pipefail
+dir=$(mktemp -d)
+touch "$dir/down"
+printf '%s\n' "$dir"
+EOS
+`))
+	s.Require().NotEmpty(dir)
+	image := s.agentImage(s.T())
+	name := "aio-shipped-down-" + path.Base(dir)
+	const process = "datadog-agent-trace"
+
+	t := s.T()
+	t.Cleanup(func() {
+		s.Env().RemoteHost.MustExecuteOn(t, "rm -rf "+shSingleQuote(dir))
+	})
+	s.Env().RemoteHost.MustExecute(fmt.Sprintf(
+		"docker run -d --name %s -e DD_API_KEY=%s -e DD_HOSTNAME=%s -v %s:/etc/services.d/trace:ro %s",
+		shSingleQuote(name),
+		shSingleQuote(aioThrowawayAPIKey),
+		shSingleQuote(aioBareHostname),
+		shSingleQuote(dir),
+		shSingleQuote(image),
+	))
+	t.Cleanup(func() {
+		s.Env().RemoteHost.MustExecuteOn(t, "docker rm -fv "+shSingleQuote(name))
+	})
+
+	run := func(c require.TestingT, args ...string) string {
+		stdout, stderr, err := s.Env().Docker.Client.ExecuteCommandStdoutStdErr(
+			name,
+			append([]string{"env", "DD_PM_SOCKET_PATH=" + aioSocket, linuxCLIBin}, args...)...,
+		)
+		require.NoError(c, err, stderr)
+		return stdout
+	}
+
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		assertField(c, run(c, "describe", "datadog-agent"), "State", "Running")
+	}, 3*time.Minute, 2*time.Second)
+	// Held processes are Skipped, not Stopped: the start pass declines them.
+	held := run(t, "describe", process)
+	assertField(t, held, "State", "Skipped")
+	assertField(t, held, "Skip Reasons", "auto_start_false")
+
+	// trace-agent would start within this window if the down marker were ignored.
+	// Call docker exec directly: require calls FailNow, which must not run off the test goroutine.
+	require.Never(t, func() bool {
+		stdout, _, err := s.Env().Docker.Client.ExecuteCommandStdoutStdErr(
+			name,
+			"env", "DD_PM_SOCKET_PATH="+aioSocket, linuxCLIBin, "describe", process,
+		)
+		return err != nil || fieldValue(stdout, "State") != "Skipped"
+	}, 10*time.Second, time.Second, "the down marker should keep "+process+" held")
+
+	run(t, "start", process)
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		assertField(c, run(c, "describe", process), "State", "Running")
+	}, 2*time.Minute, 2*time.Second)
+}
+
 // UID 100 is dd-agent. Group 0 is root, which owns the group-writable runtime directories.
 func (s *procmgrAIODockerSuite) TestNonRootUserRunsProcmgr() {
 	image := s.agentImage(s.T())
