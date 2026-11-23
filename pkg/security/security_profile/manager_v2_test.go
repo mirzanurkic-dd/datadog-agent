@@ -1560,7 +1560,7 @@ func TestManagerV2_eventsWithError(t *testing.T) {
 		event := newTestEventV2(model.FileOpenEventType, "v1", "known")
 		event.Error = &path.ErrPathResolution{Err: errors.New("dentry not found")}
 
-		_, inserted := m.insertEventIntoProfile(event)
+		_, inserted, _ := m.insertEventIntoProfile(event)
 
 		assert.False(t, inserted)
 		assert.EqualValues(t, 1, countOf(m, model.FileOpenEventType, activity_tree.InsertionErrorPathResolution))
@@ -1573,7 +1573,7 @@ func TestManagerV2_eventsWithError(t *testing.T) {
 		event.Error = &path.ErrPathResolution{Err: errors.New("dentry not found")}
 		event.ProcessCacheEntry.Ancestor = nil
 
-		_, inserted := m.insertEventIntoProfile(event)
+		_, inserted, _ := m.insertEventIntoProfile(event)
 
 		assert.False(t, inserted)
 		assert.EqualValues(t, 1, countOf(m, model.ExecEventType, activity_tree.InsertionErrorBrokenLineage))
@@ -1585,7 +1585,7 @@ func TestManagerV2_eventsWithError(t *testing.T) {
 		event := newTestEventV2(model.FullDNSResponseEventType, "v1", "known")
 		event.Error = model.ErrFailedDNSPacketDecoding
 
-		_, inserted := m.insertEventIntoProfile(event)
+		_, inserted, _ := m.insertEventIntoProfile(event)
 
 		assert.False(t, inserted)
 		assert.EqualValues(t, 1, countOf(m, model.DNSEventType, activity_tree.InsertionErrorDNSDecoding))
