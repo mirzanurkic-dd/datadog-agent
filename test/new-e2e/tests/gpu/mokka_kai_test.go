@@ -13,6 +13,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"github.com/DataDog/datadog-agent/comp/core/tagger/tags"
 	"github.com/DataDog/datadog-agent/test/e2e-framework/components/kubernetes/kaischeduler"
 	"github.com/DataDog/datadog-agent/test/e2e-framework/scenarios/aws/ec2"
 	"github.com/DataDog/datadog-agent/test/e2e-framework/scenarios/aws/kindvm"
@@ -73,9 +74,9 @@ func (s *gpuMokkaKAISuite) TestKAIJobTags() {
 
 	assertSchedulerTags(&s.BaseSuite, run, []string{
 		"pod_name:" + run.podName,
-		"kube_namespace:" + kaiWorkloadNamespace,
-		"kube_scheduler:kai",
-		"kube_scheduler_queue:" + kaiTestQueue,
-		"kai_queue:" + kaiTestQueue,
-	}, "kai_pod_group")
+		tags.KubeNamespace + ":" + kaiWorkloadNamespace,
+		tags.Scheduler + ":kai",
+		tags.SchedulerQueue + ":" + kaiTestQueue,
+		tags.KAIQueue + ":" + kaiTestQueue,
+	}, tags.KAIPodGroup)
 }

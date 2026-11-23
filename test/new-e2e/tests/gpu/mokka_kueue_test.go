@@ -9,6 +9,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/DataDog/datadog-agent/comp/core/tagger/tags"
 	"github.com/DataDog/datadog-agent/test/e2e-framework/components/kubernetes/kueue"
 	"github.com/DataDog/datadog-agent/test/e2e-framework/scenarios/aws/ec2"
 	"github.com/DataDog/datadog-agent/test/e2e-framework/scenarios/aws/kindvm"
@@ -71,10 +72,10 @@ func (s *gpuMokkaKueueSuite) TestKueueJobTags() {
 
 	assertSchedulerTags(&s.BaseSuite, run, []string{
 		"pod_name:" + run.podName,
-		"kube_namespace:" + kueueWorkloadNamespace,
-		"kube_scheduler:kueue",
-		"kube_scheduler_queue:" + kueue.DefaultClusterQueue,
-		"kueue_cluster_queue:" + kueue.DefaultClusterQueue,
-		"kueue_local_queue:" + kueueTestLocalQueue,
-	}, "kueue_workload")
+		tags.KubeNamespace + ":" + kueueWorkloadNamespace,
+		tags.Scheduler + ":kueue",
+		tags.SchedulerQueue + ":" + kueue.DefaultClusterQueue,
+		tags.KueueClusterQueue + ":" + kueue.DefaultClusterQueue,
+		tags.KueueLocalQueue + ":" + kueueTestLocalQueue,
+	}, tags.KueueWorkload)
 }

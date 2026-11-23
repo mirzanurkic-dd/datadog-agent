@@ -14,8 +14,8 @@ GPU e2e tests are located in `test/new-e2e/tests/gpu/` and verify GPU monitoring
 ### Kubernetes Tests
 - `TestGPUK8sSuiteUbuntu2204`: Tests GPU monitoring in Kubernetes on Ubuntu 22.04
 - `TestGPUMokkaK8sSuite`: Tests GPU monitoring in Kubernetes on a CPU-only kind cluster, with two NVIDIA T4 GPUs simulated by Mokka (see [Mokka (simulated GPUs)](#mokka-simulated-gpus))
-- `TestGPUMokkaKAISuite`: Tests the KAI Scheduler integration (`kube_scheduler*` and `kai_*` tags on container and allocated-GPU metrics) on the same Mokka setup, with KAI installed by `kindvm.WithKAIScheduler`
-- `TestGPUMokkaKueueSuite`: Tests the Kueue integration (`kube_scheduler*` and `kueue_*` tags on container and allocated-GPU metrics) on the same Mokka setup, with Kueue installed by `kindvm.WithKueue`
+- `TestGPUMokkaKAISuite`: Tests the KAI Scheduler integration (`job_scheduler*` and `kai_*` tags on container and allocated-GPU metrics; needs an Agent with #60168) on the same Mokka setup, with KAI installed by `kindvm.WithKAIScheduler`
+- `TestGPUMokkaKueueSuite`: Tests the Kueue integration (`job_scheduler*` and `kueue_*` tags on container and allocated-GPU metrics; needs an Agent with #60168) on the same Mokka setup, with Kueue installed by `kindvm.WithKueue`
 
 ## Key Components
 
@@ -38,6 +38,7 @@ GPU e2e tests are located in `test/new-e2e/tests/gpu/` and verify GPU monitoring
 7. **TestCOATMetricsReported**: Checks the COAT `gpu` profile selects the GPU check telemetry, using `diagnose show-metadata agent-telemetry` (core agent only)
 8. **TestZZAgentDidNotRestart**: Ensures agent didn't restart during tests
 9. **TestMockGPUAllocationTags** (Mokka suite only): A pod requesting one GPU gets its tags on the metrics of exactly one GPU
+10. **TestKAIJobTags** (KAI suite only) and **TestKueueJobTags** (Kueue suite only): A one-GPU Job submitted through the scheduler gets the scheduler tags (`tags.Scheduler`, `tags.SchedulerQueue`, and the scheduler-specific queue tags) on `container.memory.usage` and on the `gpu.core.limit` of the allocated GPU only. `assertSchedulerTags` also checks that `tags.SchedulerWorkload` and the scheduler workload tag (`kai_pod_group` or `kueue_workload`) name the same workload. For Kueue, `tags.SchedulerQueue` is the ClusterQueue, not the LocalQueue. Tag names come from `comp/core/tagger/tags`, so the suites follow the Agent.
 
 ## Provisioning
 
@@ -143,7 +144,7 @@ injects it into containers with an NRI plugin. The reusable pieces live in the e
   Call it once per GPU pool (`mokka.WithName`, `mokka.WithNodeSelector`) to mix profiles.
 
 What it covers: NVML inventory and metrics, workloadmeta GPUs, GPU tags, GPU allocation to pods
-(kubelet pod-resources), and scheduler/queue tagging of GPU pods. What it does not: CUDA
+(kubelet pod-resources). What it does not: CUDA
 execution, eBPF/system-probe probes, per-process metrics, real values (they are synthetic, assert
 presence and tags only). Keep those in the `g4dn` suites.
 
@@ -151,13 +152,14 @@ Gotchas:
 - The NRI plugin never injects into `kube-system` or the Mokka namespace, and only into containers
   created after it runs: the Agent must be deployed after Mokka (`kindvm.WithMokka` handles it).
 - The Mokka and device plugin images come from `ghcr.io` and `nvcr.io`, so the suite uses
-  `kindvm.WithInternetAccess()`.
-- The Mokka chart is pulled by Pulumi on the CI runner, which can't reach `ghcr.io`. Until the
-  `ghcr.io` ECR pull-through cache exists (ddoghq/cloud-inventory#3478), the Mokka suites run in the
-  manual `new-e2e-gpu-mokka` job instead of `new-e2e-gpu`. Locally they work as long as your machine
-  can reach `ghcr.io`.
+  `kindvm.WithInternetAccess()`. The GPU test pods use busybox through the DockerHub ECR
+  pull-through cache (`busyboxImage()`), falling back to DockerHub when no image pull registry is set.
+- The Mokka chart is pulled by Pulumi on the CI runner, through the egress gateway. `ghcr.io` is
+  allowed; `registry.k8s.io` (Kueue chart) needs ddoghq/dd-source#197311. Until the suites have been
+  validated in CI they run in the manual `new-e2e-gpu-mokka` job instead of `new-e2e-gpu`. Locally they
+  work as long as your machine can reach `ghcr.io`.
 - Set `E2E_GPU_CHART_MIRROR` to a registry that mirrors `ghcr.io` and `registry.k8s.io` under the
-  `ghcr` and `k8s` prefixes (the internal ECR, once the caches exist) to pull the charts through it.
+  `ghcr` and `k8s` prefixes (for example an internal ECR with pull-through caches) to pull the charts through it.
   If the registry is one of the `imagePullRegistry` ones, the charts are pulled with their credentials.
 - With NVLink profiles (`gb200`, `gb300`), the `nvlink_fec` collector sends FEC histogram buckets
   with counts of ~10^12 per run, and the aggregator sketch OOM-kills the core Agent within seconds.

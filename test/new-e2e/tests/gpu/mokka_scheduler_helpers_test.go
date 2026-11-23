@@ -17,6 +17,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 
+	"github.com/DataDog/datadog-agent/comp/core/tagger/tags"
 	"github.com/DataDog/datadog-agent/test/e2e-framework/testing/e2e"
 	"github.com/DataDog/datadog-agent/test/e2e-framework/testing/environments"
 	"github.com/DataDog/datadog-agent/test/e2e-framework/testing/utils/common"
@@ -66,7 +67,7 @@ func runSchedulerGPUJob(s *e2e.BaseSuite[environments.Kubernetes], job scheduler
 						Name: "work",
 						// Not pause: the Agent excludes pause containers from container metrics.
 						// busybox is statically linked, so the LD_PRELOAD Mokka injects does not affect it.
-						Image:   "busybox:1.36",
+						Image:   busyboxImage(),
 						Command: []string{"sleep", "3600"},
 						Resources: corev1.ResourceRequirements{
 							// Explicit requests, so that quota-based schedulers can admit the Job.
@@ -126,8 +127,8 @@ func assertSchedulerTags(s *e2e.BaseSuite[environments.Kubernetes], run schedule
 			if !assert.NoError(c, err) || !assert.NotEmpty(c, metrics, "no container.memory.usage with tags %v", expectedTags) {
 				return
 			}
-			assert.NotEmpty(c, withSameTagValue(metrics, "kube_scheduler_workload", workloadTagKey),
-				"no container.memory.usage with matching kube_scheduler_workload and %s tags, got: %v", workloadTagKey, tagSets(metrics))
+			assert.NotEmpty(c, withSameTagValue(metrics, tags.SchedulerWorkload, workloadTagKey),
+				"no container.memory.usage with matching "+tags.SchedulerWorkload+" and %s tags, got: %v", workloadTagKey, tagSets(metrics))
 		}, 5*time.Minute, 10*time.Second)
 	})
 
@@ -146,7 +147,7 @@ func assertSchedulerTags(s *e2e.BaseSuite[environments.Kubernetes], run schedule
 				if !hasPointSince(metric, run.runningSince) {
 					continue
 				}
-				uuid := tagValue(metric.GetTags(), "gpu_uuid")
+				uuid := tagValue(metric.GetTags(), tags.KubeGPUUUID)
 				reportedUUIDs[uuid] = struct{}{}
 				// Any series tagged with the job pod, even before the scheduler tags arrive, must be
 				// of the allocated GPU.
@@ -164,8 +165,8 @@ func assertSchedulerTags(s *e2e.BaseSuite[environments.Kubernetes], run schedule
 			if !assert.NotEmpty(c, allocated, "no gpu.core.limit of the allocated GPU %s with tags %v", run.allocatedGPU, expectedTags) {
 				return
 			}
-			assert.NotEmpty(c, withSameTagValue(allocated, "kube_scheduler_workload", workloadTagKey),
-				"no gpu.core.limit of the allocated GPU with matching kube_scheduler_workload and %s tags, got: %v", workloadTagKey, tagSets(allocated))
+			assert.NotEmpty(c, withSameTagValue(allocated, tags.SchedulerWorkload, workloadTagKey),
+				"no gpu.core.limit of the allocated GPU with matching "+tags.SchedulerWorkload+" and %s tags, got: %v", workloadTagKey, tagSets(allocated))
 		}, 5*time.Minute, 10*time.Second)
 	})
 }
