@@ -21,7 +21,7 @@ func TestRedactPayloads(t *testing.T) {
 		result := redactPayloads(kubeactions.ExecutionResult{
 			Status: kubeactions.StatusSuccess,
 			Payloads: map[string][]byte{
-				"pods/default/web": []byte(`{"spec":{"containers":[{"name":"main","args":["--token=hunter2"]}]}}`),
+				"pods/default/web": []byte(`{"spec":{"containers":[{"name":"main","args":["--password=hunter2"]}]}}`),
 			},
 		})
 

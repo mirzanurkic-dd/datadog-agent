@@ -19,6 +19,7 @@ import (
 )
 
 const secret = "hunter2"
+const lastAppliedConfigAnnotation = "kubectl.kubernetes.io/last-applied-configuration"
 
 func sensitiveContainer() corev1.Container {
 	return corev1.Container{
@@ -34,6 +35,8 @@ func sensitiveContainer() corev1.Container {
 					Key:                  "api-key",
 				},
 			}},
+			{Name: "PORT", Value: "8080"},
+			{Name: "DD_AUTH_TOKEN_FILE_PATH", Value: "/var/run/datadog/token"},
 		},
 	}
 }
@@ -52,26 +55,30 @@ func sensitiveObjectMeta() metav1.ObjectMeta {
 	return metav1.ObjectMeta{
 		Name: "web",
 		Annotations: map[string]string{
-			lastAppliedConfigAnnotation: `{"env":[{"name":"DB_PASSWORD","value":"` + secret + `"}]}`,
-			"team":                      "platform",
+			lastAppliedConfigAnnotation:         `{"env":[{"name":"DB_PASSWORD","value":"` + secret + `"}]}`,
+			"consul.hashicorp.com/original-pod": secret,
+			"example.com/config":                `{"password":"` + secret + `"}`,
+			"team":                              "platform",
 		},
 	}
 }
 
 func sensitivePodTemplateSpec() corev1.PodTemplateSpec {
-	return corev1.PodTemplateSpec{Spec: sensitivePodSpec()}
+	return corev1.PodTemplateSpec{ObjectMeta: sensitiveObjectMeta(), Spec: sensitivePodSpec()}
 }
 
 func assertContainerRedacted(t *testing.T, container corev1.Container) {
 	t.Helper()
 	assert.Equal(t, "nginx:1.27", container.Image, "other fields are kept")
-	assert.Equal(t, []string{RedactedValue, RedactedValue}, container.Command)
-	assert.Equal(t, []string{RedactedValue}, container.Args)
-	require.Len(t, container.Env, 2)
+	assert.Equal(t, []string{"sh", "-c"}, container.Command)
+	assert.Equal(t, []string{"--password=" + RedactedValue}, container.Args)
+	require.Len(t, container.Env, 4)
 	assert.Equal(t, corev1.EnvVar{Name: "DB_PASSWORD", Value: RedactedValue}, container.Env[0])
 	assert.Equal(t, "API_KEY", container.Env[1].Name, "env names are kept")
 	assert.Empty(t, container.Env[1].Value, "valueFrom env vars get no value")
 	assert.NotNil(t, container.Env[1].ValueFrom, "valueFrom references are kept")
+	assert.Equal(t, corev1.EnvVar{Name: "PORT", Value: "8080"}, container.Env[2])
+	assert.Equal(t, corev1.EnvVar{Name: "DD_AUTH_TOKEN_FILE_PATH", Value: "/var/run/datadog/token"}, container.Env[3])
 }
 
 func assertPodSpecRedacted(t *testing.T, spec corev1.PodSpec) {
@@ -83,7 +90,9 @@ func assertPodSpecRedacted(t *testing.T, spec corev1.PodSpec) {
 
 func assertObjectMetaRedacted(t *testing.T, meta metav1.ObjectMeta) {
 	t.Helper()
-	assert.Equal(t, RedactedValue, meta.Annotations[lastAppliedConfigAnnotation])
+	assert.Equal(t, "-", meta.Annotations[lastAppliedConfigAnnotation])
+	assert.Equal(t, "-", meta.Annotations["consul.hashicorp.com/original-pod"])
+	assert.JSONEq(t, `{"password":"`+RedactedValue+`"}`, meta.Annotations["example.com/config"])
 	assert.Equal(t, "platform", meta.Annotations["team"], "other annotations are kept")
 }
 
@@ -209,7 +218,7 @@ func TestRedactUnstructured(t *testing.T) {
 			"containers": []interface{}{map[string]interface{}{
 				"name":    "main",
 				"command": []interface{}{"run"},
-				"args":    []interface{}{"--token=" + secret},
+				"args":    []interface{}{"--password=" + secret},
 				"env": []interface{}{
 					map[string]interface{}{"name": "TOKEN", "value": secret},
 					map[string]interface{}{"name": "FROM_SECRET", "valueFrom": map[string]interface{}{}},
@@ -224,7 +233,7 @@ func TestRedactUnstructured(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotContains(t, string(raw), secret)
 	container := rollout["spec"].(map[string]interface{})["template"].(map[string]interface{})["spec"].(map[string]interface{})["containers"].([]interface{})[0].(map[string]interface{})
-	assert.Equal(t, []interface{}{RedactedValue}, container["command"])
+	assert.Equal(t, []interface{}{"run"}, container["command"])
 	assert.Equal(t, []interface{}{RedactedValue}, container["args"])
 	assert.Equal(t, []interface{}{
 		map[string]interface{}{"name": "TOKEN", "value": RedactedValue},
@@ -254,4 +263,69 @@ func TestRedactJSON(t *testing.T) {
 
 	_, err = RedactJSON([]byte("not json"))
 	assert.Error(t, err)
+}
+
+func TestRedactCronJobTemplateMetadata(t *testing.T) {
+	cronJob := &batchv1.CronJob{Spec: batchv1.CronJobSpec{
+		JobTemplate: batchv1.JobTemplateSpec{
+			ObjectMeta: sensitiveObjectMeta(),
+			Spec:       batchv1.JobSpec{Template: sensitivePodTemplateSpec()},
+		},
+	}}
+
+	RedactCronJob(cronJob)
+
+	assertObjectMetaRedacted(t, cronJob.Spec.JobTemplate.ObjectMeta)
+	assertObjectMetaRedacted(t, cronJob.Spec.JobTemplate.Spec.Template.ObjectMeta)
+}
+
+func TestRedactUnstructuredCustomFields(t *testing.T) {
+	resource := map[string]interface{}{
+		"metadata": map[string]interface{}{"name": "custom-secret-store"},
+		"config": map[string]interface{}{
+			"client_secret": secret,
+			"endpoint":      "https://example.com",
+		},
+		"spec": map[string]interface{}{"template": map[string]interface{}{
+			"metadata": map[string]interface{}{
+				"annotations": map[string]interface{}{
+					lastAppliedConfigAnnotation:         secret,
+					"consul.hashicorp.com/original-pod": secret,
+					"team":                              "platform",
+				},
+			},
+		}},
+	}
+
+	RedactUnstructured(resource)
+
+	assert.Equal(t, map[string]interface{}{"client_secret": RedactedValue, "endpoint": "https://example.com"}, resource["config"])
+	raw, err := json.Marshal(resource)
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw), secret)
+	assert.Contains(t, string(raw), "custom-secret-store")
+	assert.Contains(t, string(raw), "platform")
+}
+
+func TestRedactPodProbes(t *testing.T) {
+	pod := &corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+		LivenessProbe: &corev1.Probe{ProbeHandler: corev1.ProbeHandler{
+			Exec: &corev1.ExecAction{Command: []string{"check", "--password", secret}},
+		}},
+		ReadinessProbe: &corev1.Probe{ProbeHandler: corev1.ProbeHandler{
+			HTTPGet: &corev1.HTTPGetAction{HTTPHeaders: []corev1.HTTPHeader{
+				{Name: "X-API_KEY", Value: secret},
+				{Name: "Accept", Value: "application/json"},
+			}},
+		}},
+	}}}}
+
+	RedactPod(pod)
+
+	container := pod.Spec.Containers[0]
+	assert.Equal(t, []string{"check", "--password", RedactedValue}, container.LivenessProbe.Exec.Command)
+	assert.Equal(t, []corev1.HTTPHeader{
+		{Name: "X-API_KEY", Value: RedactedValue},
+		{Name: "Accept", Value: "application/json"},
+	}, container.ReadinessProbe.HTTPGet.HTTPHeaders)
 }

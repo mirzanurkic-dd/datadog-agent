@@ -5,15 +5,20 @@
 
 package kubernetes
 
-import "encoding/json"
+import (
+	"encoding/json"
 
-// RedactUnstructured applies the same redaction as RedactPod and friends to an
-// object whose type is not known in advance (custom resources, raw JSON).
-// Since the pod spec can be nested anywhere, any containers, initContainers or
-// ephemeralContainers list found in the object is redacted, as well as any
-// last-applied-configuration annotation.
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+
+	"github.com/DataDog/datadog-agent/pkg/redact"
+)
+
+// RedactUnstructured applies the Agent's custom-resource scrubbing rules and
+// sensitive metadata rules, including metadata in embedded templates.
 func RedactUnstructured(object map[string]interface{}) {
-	redactUnstructuredNode(object)
+	redact.ScrubCRManifest(&unstructured.Unstructured{Object: object}, sensitiveValuesScrubber)
+	redactUnstructuredMetadata(object)
 }
 
 // RedactJSON redacts a JSON-encoded object with RedactUnstructured.
@@ -22,57 +27,39 @@ func RedactJSON(data []byte) ([]byte, error) {
 	if err := json.Unmarshal(data, &object); err != nil {
 		return nil, err
 	}
-	redactUnstructuredNode(object)
+	redactJSONNode(object)
 	return json.Marshal(object)
 }
 
-func redactUnstructuredNode(node interface{}) {
+func redactJSONNode(node interface{}) {
 	switch value := node.(type) {
 	case map[string]interface{}:
-		for key, child := range value {
-			switch key {
-			case "containers", "initContainers", "ephemeralContainers":
-				redactUnstructuredContainers(child)
-			case "annotations":
-				redactUnstructuredAnnotations(child)
-			}
-			redactUnstructuredNode(child)
+		RedactUnstructured(value)
+	case []interface{}:
+		for _, child := range value {
+			redactJSONNode(child)
+		}
+	}
+}
+
+func redactUnstructuredMetadata(node interface{}) {
+	switch value := node.(type) {
+	case map[string]interface{}:
+		object := &unstructured.Unstructured{Object: value}
+		meta := metav1.ObjectMeta{Annotations: object.GetAnnotations(), Labels: object.GetLabels()}
+		redactObjectMeta(&meta)
+		if meta.Annotations != nil {
+			object.SetAnnotations(meta.Annotations)
+		}
+		if meta.Labels != nil {
+			object.SetLabels(meta.Labels)
+		}
+		for _, child := range value {
+			redactUnstructuredMetadata(child)
 		}
 	case []interface{}:
 		for _, child := range value {
-			redactUnstructuredNode(child)
+			redactUnstructuredMetadata(child)
 		}
-	}
-}
-
-func redactUnstructuredContainers(node interface{}) {
-	containers, _ := node.([]interface{})
-	for _, item := range containers {
-		container, ok := item.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		maskAllUnstructured(container["command"])
-		maskAllUnstructured(container["args"])
-		env, _ := container["env"].([]interface{})
-		for _, item := range env {
-			if envVar, ok := item.(map[string]interface{}); ok && envVar["value"] != nil {
-				envVar["value"] = RedactedValue
-			}
-		}
-	}
-}
-
-func redactUnstructuredAnnotations(node interface{}) {
-	annotations, _ := node.(map[string]interface{})
-	if _, found := annotations[lastAppliedConfigAnnotation]; found {
-		annotations[lastAppliedConfigAnnotation] = RedactedValue
-	}
-}
-
-func maskAllUnstructured(node interface{}) {
-	values, _ := node.([]interface{})
-	for i := range values {
-		values[i] = RedactedValue
 	}
 }

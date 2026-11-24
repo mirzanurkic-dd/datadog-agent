@@ -8,13 +8,7 @@ package kubernetes
 // Redaction of sensitive values from Kubernetes objects returned by actions,
 // gated by private_action_runner.kubernetes_redact_sensitive_values.
 //
-// Wherever an object embeds a pod spec, every container (init, regular and
-// ephemeral) gets:
-//   - its env values masked; env names and valueFrom references are kept,
-//   - its command and args entries masked.
-//
-// The kubectl last-applied-configuration annotation of these objects is masked
-// too, as it holds a full copy of the applied spec.
+// These adapters use the Agent's shared Kubernetes scrubbing rules.
 
 import (
 	"encoding/json"
@@ -23,55 +17,59 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/DataDog/datadog-agent/pkg/redact"
 )
 
-// RedactedValue replaces every redacted value.
-const RedactedValue = "*****[REDACTED]*****"
+// The scrubber is read-only after initialization and can be shared by actions.
+var sensitiveValuesScrubber = redact.NewDefaultDataScrubber()
 
-const lastAppliedConfigAnnotation = "kubectl.kubernetes.io/last-applied-configuration"
+// RedactedValue masks data that cannot be parsed for scrubbing.
+const RedactedValue = "********"
 
 // RedactPod redacts the sensitive values of a pod.
 func RedactPod(pod *corev1.Pod) {
 	redactObjectMeta(&pod.ObjectMeta)
-	redactPodSpec(&pod.Spec)
+	redact.ScrubPod(pod, sensitiveValuesScrubber)
+	redactEphemeralContainers(&pod.Spec)
 }
 
 // RedactPodTemplate redacts the sensitive values of a pod template.
 func RedactPodTemplate(podTemplate *corev1.PodTemplate) {
 	redactObjectMeta(&podTemplate.ObjectMeta)
-	redactPodSpec(&podTemplate.Template.Spec)
+	redactPodTemplateSpec(&podTemplate.Template)
 }
 
 // RedactReplicationController redacts the sensitive values of a replication controller.
 func RedactReplicationController(controller *corev1.ReplicationController) {
 	redactObjectMeta(&controller.ObjectMeta)
 	if controller.Spec.Template != nil {
-		redactPodSpec(&controller.Spec.Template.Spec)
+		redactPodTemplateSpec(controller.Spec.Template)
 	}
 }
 
 // RedactDeployment redacts the sensitive values of a deployment.
 func RedactDeployment(deployment *appsv1.Deployment) {
 	redactObjectMeta(&deployment.ObjectMeta)
-	redactPodSpec(&deployment.Spec.Template.Spec)
+	redactPodTemplateSpec(&deployment.Spec.Template)
 }
 
 // RedactDaemonSet redacts the sensitive values of a daemon set.
 func RedactDaemonSet(daemonSet *appsv1.DaemonSet) {
 	redactObjectMeta(&daemonSet.ObjectMeta)
-	redactPodSpec(&daemonSet.Spec.Template.Spec)
+	redactPodTemplateSpec(&daemonSet.Spec.Template)
 }
 
 // RedactReplicaSet redacts the sensitive values of a replica set.
 func RedactReplicaSet(replicaSet *appsv1.ReplicaSet) {
 	redactObjectMeta(&replicaSet.ObjectMeta)
-	redactPodSpec(&replicaSet.Spec.Template.Spec)
+	redactPodTemplateSpec(&replicaSet.Spec.Template)
 }
 
 // RedactStatefulSet redacts the sensitive values of a stateful set.
 func RedactStatefulSet(statefulSet *appsv1.StatefulSet) {
 	redactObjectMeta(&statefulSet.ObjectMeta)
-	redactPodSpec(&statefulSet.Spec.Template.Spec)
+	redactPodTemplateSpec(&statefulSet.Spec.Template)
 }
 
 // RedactControllerRevision redacts the sensitive values of a controller
@@ -93,52 +91,37 @@ func RedactControllerRevision(revision *appsv1.ControllerRevision) {
 // RedactJob redacts the sensitive values of a job.
 func RedactJob(job *batchv1.Job) {
 	redactObjectMeta(&job.ObjectMeta)
-	redactPodSpec(&job.Spec.Template.Spec)
+	redactPodTemplateSpec(&job.Spec.Template)
 }
 
 // RedactCronJob redacts the sensitive values of a cron job.
 func RedactCronJob(cronJob *batchv1.CronJob) {
 	redactObjectMeta(&cronJob.ObjectMeta)
-	redactPodSpec(&cronJob.Spec.JobTemplate.Spec.Template.Spec)
+	redactObjectMeta(&cronJob.Spec.JobTemplate.ObjectMeta)
+	redactPodTemplateSpec(&cronJob.Spec.JobTemplate.Spec.Template)
 }
 
 func redactObjectMeta(meta *metav1.ObjectMeta) {
-	if _, found := meta.Annotations[lastAppliedConfigAnnotation]; found {
-		meta.Annotations[lastAppliedConfigAnnotation] = RedactedValue
+	redact.RemoveSensitiveAnnotationsAndLabels(meta.Annotations, meta.Labels)
+	for key, value := range meta.Annotations {
+		meta.Annotations[key] = sensitiveValuesScrubber.ScrubAnnotationValue(value)
 	}
 }
 
-func redactPodSpec(spec *corev1.PodSpec) {
-	for i := range spec.InitContainers {
-		redactContainer(&spec.InitContainers[i])
-	}
-	for i := range spec.Containers {
-		redactContainer(&spec.Containers[i])
-	}
+func redactPodTemplateSpec(template *corev1.PodTemplateSpec) {
+	redactObjectMeta(&template.ObjectMeta)
+	redact.ScrubPodTemplateSpec(template, sensitiveValuesScrubber)
+	redactEphemeralContainers(&template.Spec)
+}
+
+func redactEphemeralContainers(spec *corev1.PodSpec) {
 	for i := range spec.EphemeralContainers {
-		container := &spec.EphemeralContainers[i].EphemeralContainerCommon
-		redactEnv(container.Env)
-		maskAll(container.Command)
-		maskAll(container.Args)
-	}
-}
-
-func redactContainer(container *corev1.Container) {
-	redactEnv(container.Env)
-	maskAll(container.Command)
-	maskAll(container.Args)
-}
-
-func redactEnv(env []corev1.EnvVar) {
-	for i := range env {
-		if env[i].Value != "" {
-			env[i].Value = RedactedValue
-		}
-	}
-}
-
-func maskAll(values []string) {
-	for i := range values {
-		values[i] = RedactedValue
+		// Adapt ephemeral containers to the existing container rules without
+		// changing the shared scrubber's behavior for other callers.
+		pod := corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{
+			corev1.Container(spec.EphemeralContainers[i].EphemeralContainerCommon),
+		}}}
+		redact.ScrubPod(&pod, sensitiveValuesScrubber)
+		spec.EphemeralContainers[i].EphemeralContainerCommon = corev1.EphemeralContainerCommon(pod.Spec.Containers[0])
 	}
 }
