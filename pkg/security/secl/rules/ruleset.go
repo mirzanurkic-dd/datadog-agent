@@ -982,6 +982,7 @@ func (rs *RuleSet) GetFieldValues(field eval.Field) []eval.FieldValue {
 // IsDiscarder partially evaluates an Event against a set of fields
 func (rs *RuleSet) IsDiscarder(ctx *eval.Context, fields []eval.Field, rules []*Rule) (bool, *Rule, error) {
 	var isDiscarder bool
+	key := eval.PartialKey(fields)
 
 	for _, rule := range rules {
 		// ignore rule that can't generate discarders
@@ -989,7 +990,7 @@ func (rs *RuleSet) IsDiscarder(ctx *eval.Context, fields []eval.Field, rules []*
 			continue
 		}
 
-		isTrue, err := rule.PartialEval(ctx, fields...)
+		isTrue, err := rule.PartialEvalWithKey(ctx, fields, key)
 		if err != nil || isTrue {
 			return false, rule, err
 		}
@@ -1123,35 +1124,34 @@ func (rs *RuleSet) Evaluate(event eval.Event) bool {
 	}
 
 	result := false
+	ev := event.(*model.Event)
 
-	resetEventEvalCtx := func() {
-		event.(*model.Event).RuleTags = nil
-	}
-	defer resetEventEvalCtx()
+	defer func() {
+		ev.RuleTags = nil
+		utils.ResetPprofLabels()
+	}()
 
 	for _, rule := range bucket.rules {
-		utils.PprofDoWithoutContext(rule.GetPprofLabels(), func() {
-			event := event.(*model.Event)
-			event.RuleTags = rule.PolicyRule.Def.ProductTags
+		utils.SetPprofLabels(rule.GetPprofLabels())
+		ev.RuleTags = rule.PolicyRule.Def.ProductTags
 
-			if rule.GetEvaluator().Eval(ctx) {
-				if rs.logger.IsTracing() {
-					rs.logger.Tracef("Rule `%s` matches with event `%s`\n", rule.ID, event)
-				}
-
-				if err := rs.runSetActions(event, ctx, rule); err != nil {
-					rs.logger.Errorf("Error while executing 'set' actions: %s", err)
-				}
-
-				if err := rs.runLogActions(event, ctx, rule); err != nil {
-					rs.logger.Errorf("Error while executing 'log' actions: %s", err)
-				}
-
-				rs.NotifyRuleMatch(ctx, rule, event)
-				result = true
+		if rule.GetEvaluator().Eval(ctx) {
+			if rs.logger.IsTracing() {
+				rs.logger.Tracef("Rule `%s` matches with event `%s`\n", rule.ID, ev)
 			}
-			ctx.PerEvalReset()
-		})
+
+			if err := rs.runSetActions(ev, ctx, rule); err != nil {
+				rs.logger.Errorf("Error while executing 'set' actions: %s", err)
+			}
+
+			if err := rs.runLogActions(ev, ctx, rule); err != nil {
+				rs.logger.Errorf("Error while executing 'log' actions: %s", err)
+			}
+
+			rs.NotifyRuleMatch(ctx, rule, ev)
+			result = true
+		}
+		ctx.PerEvalReset()
 	}
 
 	// no-op in the general case, only used to collect events in functional tests

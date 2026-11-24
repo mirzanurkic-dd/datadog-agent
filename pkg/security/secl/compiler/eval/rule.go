@@ -87,6 +87,11 @@ func NewRule(id string, expression string, parsingContext *parser.ParsingContext
 }
 
 // partialKey identifies the partial of a set of fields.
+// PartialKey returns the lookup key for a partial evaluator over fields.
+func PartialKey(fields []Field) string {
+	return partialKey(fields)
+}
+
 func partialKey(fields []Field) string {
 	if len(fields) == 1 {
 		return fields[0]
@@ -138,14 +143,23 @@ func (r *Rule) GetFieldValues(field Field) []FieldValue {
 
 // PartialEval - Partial evaluation with the given Fields
 func (r *Rule) PartialEval(ctx *Context, fields ...Field) (bool, error) {
-	key := partialKey(fields)
-	if _, exists := r.evaluator.partialEvals[key]; !exists {
+	return r.PartialEvalWithKey(ctx, fields, partialKey(fields))
+}
+
+// PartialEvalWithKey evaluates the partial evaluator for fields using a precomputed PartialKey.
+func (r *Rule) PartialEvalWithKey(ctx *Context, fields []Field, key string) (bool, error) {
+	eval, exists := r.evaluator.partialEvals[key]
+	if !exists {
 		if err := r.genPartials(fields, key); err != nil {
 			return false, err
 		}
+		eval, exists = r.evaluator.partialEvals[key]
+		if !exists {
+			return false, &ErrFieldNotFound{Field: strings.Join(fields, ", ")}
+		}
 	}
 
-	return r.evaluator.partialEval(ctx, fields, key)
+	return eval(ctx), nil
 }
 
 // GetPartialEval - Returns the Partial RuleEvaluator for the given Fields
