@@ -14,8 +14,10 @@ use std::process::Stdio;
 
 use crate::spawn::StdioSetting;
 
-pub(crate) fn to_command_stdio(setting: &StdioSetting, inheritable: bool) -> Stdio {
-    match setting {
+/// Errors only when opening a stdio file stalls (see `stop::bounded`), so the spawn fails
+/// instead of blocking the control loop.
+pub(crate) fn to_command_stdio(setting: &StdioSetting, inheritable: bool) -> io::Result<Stdio> {
+    Ok(match setting {
         StdioSetting::Null => Stdio::null(),
         StdioSetting::Inherit => {
             if inheritable {
@@ -24,19 +26,35 @@ pub(crate) fn to_command_stdio(setting: &StdioSetting, inheritable: bool) -> Std
                 Stdio::null()
             }
         }
-        StdioSetting::File(path) => file_to_stdio(path),
-    }
+        StdioSetting::File(path) => file_to_stdio(path)?,
+    })
 }
 
-fn file_to_stdio(path: &Path) -> Stdio {
-    match open_stdio_file(path) {
-        Ok(f) => f.into(),
+fn file_to_stdio(path: &Path) -> io::Result<Stdio> {
+    file_to_stdio_with(path, open_stdio_file)
+}
+
+/// `open` runs under `stop::bounded`, so a stalled open holds only its helper thread and
+/// the spawn fails with `TimedOut` or `Interrupted`.
+fn file_to_stdio_with(path: &Path, open: fn(&Path) -> io::Result<File>) -> io::Result<Stdio> {
+    let owned = path.to_path_buf();
+    let opened = crate::stop::bounded(path, move || open(&owned)).and_then(|result| result);
+    match opened {
+        Ok(f) => Ok(f.into()),
+        Err(e)
+            if matches!(
+                e.kind(),
+                io::ErrorKind::TimedOut | io::ErrorKind::Interrupted
+            ) =>
+        {
+            Err(e)
+        }
         Err(e) => {
             warn!(
                 "failed to open stdio file {}: {e}, falling back to inherit",
                 path.display()
             );
-            Stdio::inherit()
+            Ok(Stdio::inherit())
         }
     }
 }
@@ -113,7 +131,22 @@ mod tests {
     use std::time::Duration;
 
     fn command_stdio(yaml: &str) -> Stdio {
-        to_command_stdio(&parse_stdio_setting(yaml), true)
+        to_command_stdio(&parse_stdio_setting(yaml), true).unwrap()
+    }
+
+    #[test]
+    fn a_stalled_stdio_open_fails_the_spawn() {
+        // O_NONBLOCK makes a FIFO with no reader fail at once, so the stall comes from the
+        // opener itself, which runs longer than the test deadline.
+        fn stalled_open(_: &Path) -> io::Result<File> {
+            std::thread::sleep(Duration::from_secs(5));
+            Err(io::Error::other("opener returned after the deadline"))
+        }
+        let err = match file_to_stdio_with(Path::new("/unused/stdio.log"), stalled_open) {
+            Ok(_) => panic!("a stalled open must fail the spawn"),
+            Err(err) => err,
+        };
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
     }
 
     fn c_string(path: &Path) -> std::ffi::CString {
@@ -164,7 +197,7 @@ mod tests {
 
     #[test]
     fn inherit_without_console_maps_to_null() {
-        let stdio = to_command_stdio(&StdioSetting::Inherit, false);
+        let stdio = to_command_stdio(&StdioSetting::Inherit, false).unwrap();
         let (cmd, args) = test_helpers::true_cmd();
         let status = std::process::Command::new(cmd)
             .args(&args)

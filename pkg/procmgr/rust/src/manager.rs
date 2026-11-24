@@ -99,7 +99,7 @@ impl ProcessManager {
         let order = self.startup_order.read().await;
         let mut procs = self.processes.write().await;
         let Some(decided) = self
-            .run_start_pass(&mut procs, &order, exit_tx, |_| true, shutdown)
+            .run_start_pass(&mut procs, &order, exit_tx, |_| true, shutdown, true)
             .await
         else {
             return true;
@@ -162,7 +162,7 @@ impl ProcessManager {
 
         // A stop that arrived while the catalog loaded returns before anything is bound or
         // spawned. Poll once without waiting.
-        if stop_requested(&mut shutdown).await {
+        if stop_requested(&mut shutdown, true).await {
             self.shutting_down.store(true, Ordering::SeqCst);
             info!("stop requested before startup, not starting processes");
             return finish_run(None, 0).await;
@@ -478,7 +478,13 @@ impl ProcessManager {
         &self,
         exit_tx: &mpsc::Sender<ExitEvent>,
     ) -> Result<ReloadResult, Status> {
-        let catalog = self.config_loader.load();
+        // A failed or stalled read keeps the current processes. An empty catalog would stop
+        // every config-origin process.
+        let catalog = self.config_loader.try_load().map_err(|err| {
+            Status::unavailable(format!(
+                "config reload refused, keeping the current processes: {err:#}"
+            ))
+        })?;
         let valid_order: Vec<String> = catalog.processes.iter().map(|pd| pd.name.clone()).collect();
         let invalid_order: Vec<String> = catalog.invalid.iter().map(|e| e.name.clone()).collect();
         let mut valid: std::collections::HashMap<String, config::ProcessConfig> = catalog
@@ -888,10 +894,11 @@ impl ProcessManager {
         exit_tx: &mpsc::Sender<ExitEvent>,
         selected: impl Fn(&ManagedProcess) -> bool,
         shutdown: &mut Pin<&mut F>,
+        interruptible: bool,
     ) -> Option<HashSet<usize>> {
         let mut decided = HashSet::new();
         for &idx in order {
-            if stop_requested(shutdown).await {
+            if stop_requested(shutdown, interruptible).await {
                 return None;
             }
             let proc = &mut procs[idx];
@@ -900,7 +907,7 @@ impl ProcessManager {
             }
             let holds = proc.evaluate_start_pass();
             // The gate read can block, so check again before acting on its result.
-            if stop_requested(shutdown).await {
+            if stop_requested(shutdown, interruptible).await {
                 return None;
             }
             if holds.is_empty() {
@@ -924,14 +931,24 @@ impl ProcessManager {
         selected: impl Fn(&ManagedProcess) -> bool,
     ) -> HashSet<usize> {
         let mut never = std::pin::pin!(std::future::pending::<()>());
-        self.run_start_pass(procs, order, exit_tx, selected, &mut never)
+        self.run_start_pass(procs, order, exit_tx, selected, &mut never, false)
             .await
             .expect("a pending future never requests a stop")
     }
 }
 
 /// Polls `shutdown` once without waiting. Returns true if it has resolved.
-async fn stop_requested<F: Future<Output = ()>>(shutdown: &mut Pin<&mut F>) -> bool {
+///
+/// With `honor_flag`, the stop flag counts too. It covers a signal that a blocked config read saw
+/// before tokio's driver readied the shutdown future. Create and reload pass `false`, since a stop
+/// does not interrupt them.
+async fn stop_requested<F: Future<Output = ()>>(
+    shutdown: &mut Pin<&mut F>,
+    honor_flag: bool,
+) -> bool {
+    if honor_flag && crate::stop::stop_requested_flag() {
+        return true;
+    }
     tokio::select! {
         biased;
         _ = shutdown.as_mut() => true,
@@ -1476,6 +1493,62 @@ mod tests {
         let result = mgr.handle_stop("crit").await?;
         assert_eq!(result.state, ProcessState::Stopped);
         assert_eq!(mgr.supervisor_exit_code(), Some(0));
+        Ok(())
+    }
+
+    /// A catalog whose reads can be made to fail, as a stalled directory is.
+    struct FlakyCatalog {
+        inner: Arc<MutableConfigLoader>,
+        fail: std::sync::atomic::AtomicBool,
+    }
+
+    impl ConfigLoader for FlakyCatalog {
+        fn load(&self) -> LoadedCatalog {
+            self.inner.load()
+        }
+        fn try_load(&self) -> anyhow::Result<LoadedCatalog> {
+            if self.fail.load(std::sync::atomic::Ordering::SeqCst) {
+                anyhow::bail!("catalog read stalled");
+            }
+            Ok(self.inner.load())
+        }
+        fn source(&self) -> &str {
+            self.inner.source()
+        }
+        fn location(&self) -> String {
+            self.inner.location()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_reload_with_a_stalled_catalog_keeps_the_current_set() -> anyhow::Result<()> {
+        let inner = Arc::new(MutableConfigLoader::new(vec![sleep_def("keep")]));
+        let loader = Arc::new(FlakyCatalog {
+            inner: inner.clone(),
+            fail: std::sync::atomic::AtomicBool::new(false),
+        });
+        let mgr = ProcessManager::new(loader.clone(), uuid_gen());
+        let (exit_tx, _exit_rx) = mpsc::channel::<ExitEvent>(256);
+        mgr.start(&exit_tx).await;
+
+        // The catalog would be empty if the read had succeeded, which would stop "keep".
+        inner.set(vec![]);
+        loader.fail.store(true, std::sync::atomic::Ordering::SeqCst);
+        let err = match mgr.handle_reload_config(&exit_tx).await {
+            Ok(_) => panic!("a stalled read must refuse the reload"),
+            Err(err) => err,
+        };
+        assert_eq!(err.code(), tonic::Code::Unavailable);
+        let procs = mgr.processes().await;
+        assert_eq!(procs.len(), 1, "the current set must be kept");
+        assert!(
+            procs[0].is_running(),
+            "the kept process must still be running"
+        );
+        // The read guard must go before shutdown, which takes the write lock.
+        drop(procs);
+
+        mgr.shutdown().await;
         Ok(())
     }
 

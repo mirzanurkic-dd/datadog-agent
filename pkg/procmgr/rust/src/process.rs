@@ -530,7 +530,17 @@ impl ManagedProcess {
         let mut reasons = Vec::new();
         if let Some(raw) = &self.config.condition_path_exists {
             let path = expand_env_vars(raw);
-            if !std::path::Path::new(&path).exists() {
+            // A stalled check holds the process, the same as a missing path.
+            let owned = std::path::PathBuf::from(&path);
+            let exists = crate::stop::bounded(std::path::Path::new(&path), move || owned.exists())
+                .unwrap_or_else(|err| {
+                    warn!(
+                        "[{}] condition_path_exists stalled ({err}); holding",
+                        self.name
+                    );
+                    false
+                });
+            if !exists {
                 if log == HoldLog::Emit {
                     info!("[{}] condition_path_exists not met: {path}", self.name);
                 }

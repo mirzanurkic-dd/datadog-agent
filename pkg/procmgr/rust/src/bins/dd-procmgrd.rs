@@ -11,6 +11,9 @@
 //! initialization. On Unix it runs as a plain console daemon.
 
 fn main() {
+    // First, so a SIGTERM that arrives after the entrypoint's exec is recorded, not discarded.
+    #[cfg(unix)]
+    dd_procmgrd::platform::install_early_stop_handler();
     #[cfg(windows)]
     if let Some(code) = dd_procmgrd::platform::dispatch_internal_console_signal() {
         std::process::exit(code);

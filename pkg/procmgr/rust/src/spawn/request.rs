@@ -146,7 +146,17 @@ fn collect_env(
             (false, raw_path.as_str())
         };
 
-        if optional && !std::path::Path::new(path).exists() {
+        // The existence check runs on the bounded helper, so a stalled mount fails this spawn
+        // instead of blocking the control loop.
+        let present = if optional {
+            let owned = std::path::PathBuf::from(path);
+            crate::stop::bounded(std::path::Path::new(path), move || owned.exists()).with_context(
+                || format!("[{process_name}] could not check environment file: {path}"),
+            )?
+        } else {
+            true
+        };
+        if !present {
             info!("[{process_name}] optional environment file not found, skipping: {path}");
         } else {
             let vars = parse_environment_file(path).with_context(|| {

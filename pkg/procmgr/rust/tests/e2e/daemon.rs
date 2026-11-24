@@ -116,31 +116,27 @@ fn test_cli_daemon_shutdown_during_startup_exits_cleanly() {
             .expect("open gate fifo for writing");
         let _ = opened_tx.send(());
         let _ = release_rx.recv();
-        // Open the gate, so "gated" would start if the daemon did not check for the stop.
-        std::io::Write::write_all(&mut writer, b"apm_config:\n  enabled: true\n")
-            .expect("write gate");
+        // Open the gate, so "gated" would start if the daemon did not check for the stop. The
+        // daemon may have exited already, so a closed reader is not an error here.
+        let _ = std::io::Write::write_all(&mut writer, b"apm_config:\n  enabled: true\n");
         drop(writer);
     });
     let socket = env.env_root().join("daemon.sock");
     let mut daemon = DaemonHandle::start(env.config_dir(), &socket);
-    // The open returns once the daemon reads the gate, so SIGTERM lands while the read is blocked.
+    // The open returns once the daemon reads the gate. The writer stays open from here on, so
+    // the gate read stays blocked until the daemon's stop interrupts it.
     opened_rx
         .recv_timeout(Duration::from_secs(10))
         .expect("daemon never opened the gate fifo");
 
     daemon.send_signal(Signal::SIGTERM);
-    // Give the signal time to land while start() is still blocked on the gate.
-    std::thread::sleep(Duration::from_millis(200));
-    if let Some(status) = daemon.try_exit_status() {
-        panic!("daemon exited before the gate was released: {status:?}");
-    }
-    // Releasing the writer writes the gate and closes it, so the read resolves.
-    let _ = release_tx.send(());
-    writer.join().expect("writer thread panicked");
-
     let status = daemon
         .wait_for_exit(Duration::from_secs(10))
-        .expect("daemon did not exit after SIGTERM during startup");
+        .expect("daemon did not exit after SIGTERM while the gate read was blocked");
+    // Only now release the writer. Its write would otherwise open the gate for a read that
+    // must never happen.
+    let _ = release_tx.send(());
+    writer.join().expect("writer thread panicked");
     assert_eq!(
         status.code(),
         Some(0),
@@ -197,8 +193,8 @@ fn test_cli_daemon_shutdown_during_catalog_load_starts_nothing() {
             .expect("open catalog fifo for writing");
         let _ = opened_tx.send(());
         let _ = release_rx.recv();
-        std::io::Write::write_all(&mut writer, b"command: /usr/bin/true\nauto_start: true\n")
-            .expect("write catalog entry");
+        let _ =
+            std::io::Write::write_all(&mut writer, b"command: /usr/bin/true\nauto_start: true\n");
     });
 
     let socket = env.env_root().join("daemon.sock");
@@ -207,18 +203,13 @@ fn test_cli_daemon_shutdown_during_catalog_load_starts_nothing() {
         .recv_timeout(Duration::from_secs(10))
         .expect("daemon never opened the catalog fifo");
 
+    // The writer stays open, so the catalog read stays blocked until the stop interrupts it.
     daemon.send_signal(Signal::SIGTERM);
-    // Give the signal time to reach the runtime before the loader returns.
-    std::thread::sleep(Duration::from_millis(200));
-    if let Some(status) = daemon.try_exit_status() {
-        panic!("daemon exited before the catalog was released: {status:?}");
-    }
-    let _ = release_tx.send(());
-    writer.join().expect("writer thread panicked");
-
     let status = daemon
         .wait_for_exit(Duration::from_secs(10))
-        .expect("daemon did not exit after SIGTERM during catalog load");
+        .expect("daemon did not exit after SIGTERM while the catalog read was blocked");
+    let _ = release_tx.send(());
+    writer.join().expect("writer thread panicked");
     assert_eq!(
         status.code(),
         Some(0),
