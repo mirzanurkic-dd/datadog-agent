@@ -71,14 +71,58 @@ pub fn remove_startup_staging_dir() {
 #[cfg(not(unix))]
 pub fn remove_startup_staging_dir() {}
 
+/// How long shutdown waits for the staging directory to go. A filesystem that stops answering
+/// must not hold PID 1 past the container's stop grace period. The removal keeps running on
+/// its helper thread, which the process exit ends.
+#[cfg(unix)]
+const STAGING_CLEANUP_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+
 #[cfg(unix)]
 fn remove_checked_staging_dir(path: &Path, token: &str) -> Result<(), String> {
-    check_startup_staging_dir(path).map_err(str::to_string)?;
-    check_staging_launch_token(path, token).map_err(str::to_string)?;
+    remove_staging_dir_within(
+        path,
+        token,
+        STAGING_CLEANUP_DEADLINE,
+        remove_tree_for_staging,
+    )
+}
+
+/// The checks and the removal both touch the path, so they run together on the helper thread.
+/// A stalled filesystem then holds only that thread, and the caller gives up after `deadline`.
+#[cfg(unix)]
+fn remove_staging_dir_within(
+    path: &Path,
+    token: &str,
+    deadline: std::time::Duration,
+    remove: impl FnOnce(&Path) -> Result<(), String> + Send + 'static,
+) -> Result<(), String> {
+    let owned = path.to_path_buf();
+    let token = token.to_string();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = check_startup_staging_dir(&owned)
+            .map_err(str::to_string)
+            .and_then(|()| check_staging_launch_token(&owned, &token).map_err(str::to_string))
+            .and_then(|()| remove(&owned));
+        let _ = tx.send(result);
+    });
+    match rx.recv_timeout(deadline) {
+        Ok(result) => {
+            result?;
+            log::info!("removed staging directory {}", path.display());
+            Ok(())
+        }
+        Err(_) => Err(format!(
+            "removal did not finish within {}s, leaving it",
+            deadline.as_secs_f64()
+        )),
+    }
+}
+
+#[cfg(unix)]
+fn remove_tree_for_staging(path: &Path) -> Result<(), String> {
     make_tree_removable(path).map_err(|err| err.to_string())?;
-    std::fs::remove_dir_all(path).map_err(|err| err.to_string())?;
-    log::info!("removed staging directory {}", path.display());
-    Ok(())
+    std::fs::remove_dir_all(path).map_err(|err| err.to_string())
 }
 
 /// The token and the owner are what tie the path to the directory this launch created.
@@ -153,7 +197,8 @@ fn check_startup_staging_dir(path: &Path) -> Result<(), &'static str> {
     }
 }
 
-/// `chmod u+w` for this process's tree. A mode 0555 copy is otherwise not removable.
+/// `chmod u+w` for this process's tree, and `u+rwx` on directories so they can be listed. A
+/// mode 0555 copy is otherwise not removable.
 #[cfg(unix)]
 fn make_tree_removable(path: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
@@ -162,7 +207,8 @@ fn make_tree_removable(path: &Path) -> std::io::Result<()> {
         return Ok(());
     }
     let mut perms = meta.permissions();
-    perms.set_mode(perms.mode() | 0o200);
+    let owner_bits = if meta.is_dir() { 0o700 } else { 0o200 };
+    perms.set_mode(perms.mode() | owner_bits);
     std::fs::set_permissions(path, perms)?;
     if !meta.is_dir() {
         return Ok(());
@@ -177,10 +223,43 @@ fn make_tree_removable(path: &Path) -> std::io::Result<()> {
 mod startup_staging_tests {
     use super::{
         STAGING_TOKEN_FILE, STARTUP_STAGING_PREFIX, check_startup_staging_dir,
-        remove_checked_staging_dir,
+        remove_checked_staging_dir, remove_staging_dir_within,
     };
     use std::fs;
     use std::path::Path;
+
+    /// A removal that never returns must not hold the caller past the deadline, and the
+    /// directory is left in place.
+    #[test]
+    fn a_stalled_removal_is_abandoned_at_the_deadline() {
+        let root =
+            std::env::temp_dir().join(format!("procmgr-staging-stall-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let ours = root.join(staging_name());
+        fs::create_dir_all(&ours).unwrap();
+        let token = "0123456789abcdef0123456789abcdef";
+        fs::write(ours.join(STAGING_TOKEN_FILE), format!("{token}\n")).unwrap();
+
+        // The removal waits until this sender is dropped at the end of the test.
+        let (release, blocked) = std::sync::mpsc::channel::<()>();
+        let started = std::time::Instant::now();
+        let result = remove_staging_dir_within(
+            &ours,
+            token,
+            std::time::Duration::from_millis(100),
+            move |_| {
+                let _ = blocked.recv();
+                Ok(())
+            },
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        let err = result.expect_err("a removal past the deadline must fail");
+        assert!(err.contains("did not finish"), "{err}");
+        assert!(ours.exists());
+        drop(release);
+        let _ = fs::remove_dir_all(&root);
+    }
 
     fn staging_name() -> String {
         format!("{STARTUP_STAGING_PREFIX}{}", &uuid_like()[..6])

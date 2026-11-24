@@ -309,16 +309,15 @@ pub fn condition_config_none_met(conditions: &[ConditionConfigFile]) -> bool {
 }
 
 /// Whether any gated file could not be read in time. The gate then holds, for both kinds:
-/// an any-of is unmet and a none-of vetoes. Every file is loaded before the check, so one
-/// stall is seen even when an earlier key already decides the gate.
+/// an any-of is unmet and a none-of vetoes. This runs before any key is checked, so a stall is
+/// seen even when an earlier key would decide the gate. The first stall decides the hold, so
+/// the files after it are not read.
 fn any_file_stalled(conditions: &[ConditionConfigFile], yaml: &mut YamlCache) -> bool {
-    let mut stalled = false;
-    for file in conditions {
+    conditions.iter().any(|file| {
         let path = expand_env_vars(&file.path);
         yaml.root(&path);
-        stalled |= yaml.is_stalled(&path);
-    }
-    stalled
+        yaml.is_stalled(&path)
+    })
 }
 
 fn evaluate(conditions: &[ConditionConfigFile], os: HostOs) -> bool {
@@ -704,16 +703,26 @@ fn path_to_string(path: PathBuf) -> String {
 
 /// Reads a gated file. The flag is true when the read stalled, which holds the gate.
 fn read_config_file(path: &str) -> (Value, bool) {
-    match crate::stop::read_config_to_string(Path::new(path)) {
+    // An error from the bounded call itself (a stall, a refusal, or a reader that could not run)
+    // holds the process. Only an error from the read is a file the gate can fall back from.
+    let owned = PathBuf::from(path);
+    let read = match crate::stop::bounded(Path::new(path), move || std::fs::read_to_string(owned)) {
+        Ok(read) => read,
+        Err(err) => {
+            log::error!("config_gate: read {path} stalled ({err}); holding the process");
+            return (Value::Null, true);
+        }
+    };
+    match read {
         Ok(contents) => {
             let value = agent_yaml::load(&contents).unwrap_or_else(|err| {
-                log::warn!("condition_config_any: parse {path}: {err:#}; using env and defaults");
+                log::warn!("config_gate: parse {path}: {err:#}; using env and defaults");
                 Value::Null
             });
             (value, false)
         }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            log::debug!("condition_config_any: {path} not found; using env and defaults");
+            log::debug!("config_gate: {path} not found; using env and defaults");
             (Value::Null, false)
         }
         Err(err)
@@ -722,11 +731,11 @@ fn read_config_file(path: &str) -> (Value, bool) {
                 std::io::ErrorKind::TimedOut | std::io::ErrorKind::Interrupted
             ) =>
         {
-            log::warn!("condition_config_any: read {path} stalled ({err}); holding the process");
+            log::error!("config_gate: read {path} stalled ({err}); holding the process");
             (Value::Null, true)
         }
         Err(err) => {
-            log::warn!("condition_config_any: read {path}: {err:#}; using env and defaults");
+            log::warn!("config_gate: read {path}: {err:#}; using env and defaults");
             (Value::Null, false)
         }
     }

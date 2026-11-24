@@ -87,6 +87,12 @@ fn bounded_with<T: Send + 'static>(
     stop: &AtomicBool,
     op: impl FnOnce() -> T + Send + 'static,
 ) -> io::Result<T> {
+    if stop.load(Ordering::SeqCst) {
+        return Err(io::Error::new(
+            io::ErrorKind::Interrupted,
+            format!("{}: stop requested, not reading", path.display()),
+        ));
+    }
     {
         let mut abandoned = lock_abandoned();
         abandoned.retain(|a| a.since.elapsed() < retry_after);
@@ -201,6 +207,23 @@ mod tests {
             "command: /bin/true\n"
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_stop_already_requested_starts_no_call() {
+        let stop = AtomicBool::new(true);
+        let ran = Arc::new(AtomicBool::new(false));
+        let ran_in_call = Arc::clone(&ran);
+        let err = bounded_with(
+            Path::new("/unused"),
+            Duration::from_secs(5),
+            RETRY_AFTER,
+            &stop,
+            move || ran_in_call.store(true, Ordering::SeqCst),
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::Interrupted, "{err}");
+        assert!(!ran.load(Ordering::SeqCst), "the call must not run");
     }
 
     #[test]

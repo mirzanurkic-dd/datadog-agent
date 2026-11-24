@@ -70,19 +70,21 @@ func (s *dockerPARSplitSuite) TestS6AllInOneTopologyExecutesTask() {
 		s.Env().RemoteHost.MustExecuteOn(t, "docker start "+parSplitAgentContainer)
 	})
 
-	// The env file keeps the suite's API key and runner key out of the command line.
+	t.Cleanup(func() {
+		s.Env().RemoteHost.MustExecuteOn(t, "docker rm -fv "+parSplitS6Container+" >/dev/null 2>&1 || true")
+	})
+	// The env file keeps the suite's API key and runner key out of the command line. A container
+	// left by an interrupted earlier run is removed first, so the fixed name does not collide.
 	s.Env().RemoteHost.MustExecute(fmt.Sprintf(`bash -s <<'EOS'
 set -euo pipefail
 env_file=$(mktemp)
 trap 'rm -f "$env_file"' EXIT
 docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' %[1]s >"$env_file"
 image=$(docker inspect -f '{{.Config.Image}}' %[1]s)
+docker rm -fv %[2]s >/dev/null 2>&1 || true
 docker run -d --name %[2]s --env-file "$env_file" -e ENTRYPOINT=s6-all-in-one "$image"
 EOS
 `, parSplitAgentContainer, parSplitS6Container))
-	t.Cleanup(func() {
-		s.Env().RemoteHost.MustExecuteOn(t, "docker rm -fv "+parSplitS6Container)
-	})
 
 	s.runSplitTask(parSplitS6Container, "s6-svscan")
 }

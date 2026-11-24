@@ -203,18 +203,13 @@ const containerMainProcessesCommand = `sh -c 'echo SUPERVISOR_PROCS; self=$(read
 func (suite *ecsSuite) Test01SupervisorIsProcmgr() {
 	suite.EventuallyWithTf(func(c *assert.CollectT) {
 		tasks, err := suite.linuxAgentTasks("ec2-linux-dd-agent")
-		if !assert.NoError(c, err) || !assert.NotEmpty(c, tasks, "no running EC2 Agent daemon tasks") {
-			return
-		}
+		require.NoError(c, err)
+		require.NotEmpty(c, tasks, "no running EC2 Agent daemon tasks")
 		for _, task := range tasks {
 			out, err := suite.execMainProcesses(task.taskARN)
-			if !assert.NoError(c, err) {
-				return
-			}
+			require.NoError(c, err)
 			procs, err := supervisorProcs(out)
-			if !assert.NoErrorf(c, err, "exec into %s: %v\n%s", task.taskARN, err, out) {
-				return
-			}
+			require.NoErrorf(c, err, "exec into %s: %v\n%s", task.taskARN, err, out)
 			assert.Containsf(c, procs, "dd-procmgrd", "EC2 Agent task %s main processes: %v", task.taskARN, procs)
 			assert.NotContainsf(c, procs, "s6-svscan", "EC2 Agent task %s is supervised by s6: %v", task.taskARN, procs)
 			assert.NotContainsf(c, procs, "s6-supervise", "EC2 Agent task %s is supervised by s6: %v", task.taskARN, procs)
@@ -225,13 +220,11 @@ func (suite *ecsSuite) Test01SupervisorIsProcmgr() {
 	// tasks, so the process list the Agent reports is the signal instead.
 	suite.EventuallyWithTf(func(c *assert.CollectT) {
 		nginx, err := suite.linuxAgentTasks("nginx-fg")
-		if !assert.NoError(c, err) || !assert.NotEmpty(c, nginx, "no running nginx-fg Agent containers") {
-			return
-		}
+		require.NoError(c, err)
+		require.NotEmpty(c, nginx, "no running nginx-fg Agent containers")
 		redis, err := suite.linuxAgentTasks("redis-fg")
-		if !assert.NoError(c, err) || !assert.NotEmpty(c, redis, "no running redis-fg Agent containers") {
-			return
-		}
+		require.NoError(c, err)
+		require.NotEmpty(c, redis, "no running redis-fg Agent containers")
 		suite.assertFargateAgentsUseProcmgr(c, append(nginx, redis...))
 	}, 5*time.Minute, 10*time.Second, "Fargate Agent containers are not running under dd-procmgrd")
 }
@@ -852,11 +845,18 @@ func (suite *ecsSuite) execMainProcesses(taskARN string) (string, error) {
 		if container.Name == nil || *container.Name != "datadog-agent" {
 			continue
 		}
-		if len(container.ManagedAgents) == 0 || container.ManagedAgents[0].LastStatus == nil {
+		var execAgent *awsecstypes.ManagedAgent
+		for i := range container.ManagedAgents {
+			if container.ManagedAgents[i].Name == awsecstypes.ManagedAgentNameExecuteCommandAgent {
+				execAgent = &container.ManagedAgents[i]
+				break
+			}
+		}
+		if execAgent == nil || execAgent.LastStatus == nil {
 			return "", fmt.Errorf("exec agent not registered on %s", taskARN)
 		}
-		if *container.ManagedAgents[0].LastStatus != "RUNNING" {
-			return "", fmt.Errorf("exec agent status %s on %s", *container.ManagedAgents[0].LastStatus, taskARN)
+		if *execAgent.LastStatus != "RUNNING" {
+			return "", fmt.Errorf("exec agent status %s on %s", *execAgent.LastStatus, taskARN)
 		}
 		ready = true
 	}
@@ -868,9 +868,7 @@ func (suite *ecsSuite) execMainProcesses(taskARN string) (string, error) {
 
 func (suite *ecsSuite) assertFargateAgentsUseProcmgr(c *assert.CollectT, tasks []ecsAgentTask) {
 	payloads, err := suite.Fakeintake.GetProcesses()
-	if !assert.NoError(c, err) {
-		return
-	}
+	require.NoError(c, err)
 
 	for _, task := range tasks {
 		host := "fargate_task:" + task.taskARN

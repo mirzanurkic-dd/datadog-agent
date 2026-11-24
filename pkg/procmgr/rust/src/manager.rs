@@ -116,7 +116,9 @@ impl ProcessManager {
         match proc.spawn(exit_tx.clone()) {
             Ok(()) => Ok(()),
             Err(e) => {
-                if proc.config().exit_with_supervisor {
+                // A spawn cut short by a stop is not a critical failure. The daemon is stopping
+                // and must still exit 0.
+                if proc.config().exit_with_supervisor && !crate::stop::stop_requested_flag() {
                     warn!("[{}] critical process failed to start", proc.name());
                     self.request_supervisor_exit(proc.name(), SPAWN_FAILURE_EXIT_CODE);
                 }
@@ -914,6 +916,10 @@ impl ProcessManager {
                 if let Err(e) = self.spawn_process(proc, exit_tx) {
                     warn!("{e:#}");
                 }
+                // A spawn can block on a stdio or env file, so check once more.
+                if stop_requested(shutdown, interruptible).await {
+                    return None;
+                }
             } else {
                 proc.record_start_hold(holds, &[]);
             }
@@ -922,7 +928,8 @@ impl ProcessManager {
         Some(decided)
     }
 
-    /// Start pass for create and reload, which a stop request does not interrupt.
+    /// Start pass for create and reload. A stop request does not end the pass, but its
+    /// filesystem calls still return early on a stop.
     async fn run_start_pass_uninterrupted(
         &self,
         procs: &mut [ManagedProcess],

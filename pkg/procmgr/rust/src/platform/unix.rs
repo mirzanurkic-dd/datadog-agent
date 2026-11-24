@@ -102,7 +102,8 @@ pub fn install_early_stop_handler() {
     for sig in [Signal::SIGTERM, Signal::SIGINT] {
         // SAFETY: the handler only stores to an atomic flag, which is async-signal-safe.
         if let Err(err) = unsafe { nix::sys::signal::sigaction(sig, &action) } {
-            log::warn!("failed to install early {sig} handler: {err}");
+            // The logger is not set up yet this early.
+            eprintln!("dd-procmgrd: failed to install early {sig} handler: {err}");
         }
     }
 }

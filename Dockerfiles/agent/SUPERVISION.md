@@ -57,9 +57,10 @@ where a probe script can execute. A temporary staging directory is removed after
   instead.
 - Scripts run with `S6_KEEP_ENV=1`, so a `#!/usr/bin/with-contenv` shebang sees the container
   environment even with `S6_KEEP_ENV=0`.
-- Scripts run in their own session with SIGINT and SIGQUIT ignored. Stopping the container
-  during cont-init sends SIGTERM to that session, including children it forked, and the
-  entrypoint waits for them to exit. A script that ignores SIGTERM gets SIGKILL 5 seconds
+- Scripts run in their own session and process group with SIGINT and SIGQUIT ignored.
+  Stopping the container during cont-init sends SIGTERM to that process group, including
+  children it forked, and the entrypoint waits for them to exit. A child that moves to its own
+  process group is not signaled. A script that ignores SIGTERM gets SIGKILL 5 seconds
   later, so the container exits with code 143 before Docker's default 10-second timeout.
   A `docker stop -t` under 5 seconds ends the container first, with code 137.
 
@@ -68,8 +69,10 @@ where a probe script can execute. A temporary staging directory is removed after
 A directory under `/etc/services.d/` that is not a shipped name and contains a `run` file
 starts as a custom service. Its name must be a valid process name and must not match a catalog
 process. The entrypoint copies the whole directory and runs the copy, so the working directory
-is the staged copy. Custom services use `restart: always` (1 second after every exit, no limit)
-and run with `S6_KEEP_ENV=1`. A `down` file leaves one stopped until `dd-procmgr start <name>`.
+is the staged copy. Links inside it are copied as links, so a relative link must point inside
+the service directory or be replaced by an absolute one. `run` itself is copied as a file.
+Custom services use `restart: always` (1 second after every exit, no limit) and run with
+`S6_KEEP_ENV=1`. A `down` file leaves one stopped until `dd-procmgr start <name>`.
 
 The shipped directories (`agent`, `data-plane`, `otel`, `privateactionrunner`, `process`,
 `security`, `sysprobe`, `trace`) are already in the catalog, so their `run` files are not
@@ -102,9 +105,12 @@ with code 0, so restart the container instead.
 
 - When the core Agent exits, the other processes stop and the container exits with the Agent's
   exit code, or 128 plus the signal number when a signal killed it (137 after `SIGKILL`).
-- On `docker stop`, each process gets its `stop_timeout` (90 seconds by default, 180 seconds
-  for `datadog-agent-par-control`) before it is killed. A clean shutdown exits 0. If processes
-  are still running when Docker's default 10-second grace period ends, the container exits 137.
+- On `docker stop`, the processes stop concurrently: each gets its `stop_timeout` (90 seconds
+  by default, 180 seconds for `datadog-agent-par-control`) from the same moment, so the
+  shutdown takes about the longest timeout, not the sum. A process still alive after its
+  timeout is force-killed, and a process that survives the force-kill can add up to 10 seconds
+  before the container gives up on it. A clean shutdown exits 0. If processes are still running
+  when Docker's default 10-second grace period ends, the container exits 137.
 - `docker stop` during cont-init exits 143. An interrupt (INT) before `dd-procmgrd` starts
   also exits 143.
 - A recommended grace period has not been measured yet.

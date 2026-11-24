@@ -694,7 +694,7 @@ fn procmgr_all_in_one_entrypoint_runs_cont_init_then_dd_procmgrd() {
     );
     // Compare each loop as one contiguous slice, so generic `fi` and `done` lines stay attached.
     let staging_cleanup =
-        r#"if [[ "$copy_dir" != "$primary" ]]; then rm -rf "$copy_dir"; cleanup_dir=""; fi"#;
+        r#"if [[ "$copy_dir" != "$primary" ]]; then remove_tree "$copy_dir"; cleanup_dir=""; fi"#;
     // Use unique lines only: pos() returns the first match.
     let steps = [
         "stage_executes() {",
@@ -709,12 +709,12 @@ fn procmgr_all_in_one_entrypoint_runs_cont_init_then_dd_procmgrd() {
         "cleanup_dir=",
         "on_term() {",
         "trap on_term TERM INT",
-        r#"trap 'if [[ -n "$cleanup_dir" ]]; then chmod -R u+w "$cleanup_dir" 2>/dev/null || true; rm -rf "$cleanup_dir" 2>/dev/null || true; fi' EXIT"#,
+        r#"trap 'if [[ -n "$cleanup_dir" ]]; then remove_tree "$cleanup_dir" 2>/dev/null || true; fi' EXIT"#,
         "copy_dir=",
         "primary=/var/run/s6/procmgr-cont-init.d",
-        r#"if rm -rf "$primary" 2>/dev/null && mkdir "$primary" 2>/dev/null && stage_executes "$primary"; then"#,
+        r#"if remove_tree "$primary" 2>/dev/null && mkdir "$primary" 2>/dev/null && stage_executes "$primary"; then"#,
         "copy_dir=$primary",
-        r#"rm -rf "$primary" 2>/dev/null || true"#,
+        r#"remove_tree "$primary" 2>/dev/null || true"#,
         r#"for parent in "${TMPDIR:-/tmp}" /opt/datadog-agent/run; do"#,
         r#"if ! candidate=$(mktemp -d "$parent/procmgr-cont-init.d.XXXXXX" 2>/dev/null); then"#,
         "continue",
@@ -722,7 +722,7 @@ fn procmgr_all_in_one_entrypoint_runs_cont_init_then_dd_procmgrd() {
         "copy_dir=$candidate",
         r#"if stage_executes "$candidate"; then"#,
         "break",
-        r#"rm -rf "$candidate""#,
+        r#"remove_tree "$candidate""#,
         r#"cleanup_dir="""#,
         r#"copy_dir="""#,
         r#"echo "cannot stage /etc/cont-init.d: no writable executable directory in /var/run/s6, ${TMPDIR:-/tmp}, or /opt/datadog-agent/run" >&2"#,
@@ -839,10 +839,14 @@ fn procmgr_all_in_one_entrypoint_runs_cont_init_then_dd_procmgrd() {
         "the script must end with set +e, execfail, exec, status, exit"
     );
     assert!(
-        script.contains("cp -RL --"),
-        "a custom service runs from a staged copy of its directory"
+        script.contains(r#"cp -RH -- "$service_dir" "$stage""#),
+        "a custom service runs from a staged copy of its directory that keeps inner links"
     );
-    assert!(script.contains("chmod -R u+w"));
+    assert!(
+        script.contains(r#"cp -L -- "$service_dir/run" "$stage/run""#),
+        "run is a real copy, so its chmod never follows a link into the source"
+    );
+    assert!(script.contains(r#"[[ -L "$1" ]] || chmod -R u+rwX -- "$1" 2>/dev/null || true"#));
     assert!(script.contains("DD_PM_CONFIG_DIR=/opt/datadog-agent/processes.d/aio"));
     assert!(
         script.contains(

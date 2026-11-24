@@ -23,7 +23,8 @@ import (
 
 const (
 	aioAgentContainer = "datadog-agent"
-	// docker exec does not see the entrypoint's socket export, so the CLI gets it explicitly.
+	// The all-in-one socket. The CLI falls back to it, but docker exec does not see the
+	// entrypoint's socket export, so most tests pass it explicitly.
 	aioSocket = "/opt/datadog-agent/run/dd-procmgrd.sock"
 	// Above the 90s default stop_timeout, so a SIGKILL means a hung shutdown.
 	aioStopTimeoutSec = "120"
@@ -312,6 +313,7 @@ EOS
 	t.Cleanup(func() {
 		s.Env().RemoteHost.MustExecuteOn(t, "rm -rf "+shSingleQuote(dir))
 	})
+	s.removeContainerNowAndOnCleanup(t, name)
 	s.Env().RemoteHost.MustExecute(fmt.Sprintf(
 		"docker run -d --name %s -e DD_API_KEY=%s -e DD_HOSTNAME=%s -e S6_KEEP_ENV=0 -e AIO_CONTENV_VALUE=from-container -v %s:/etc/cont-init.d/90-with-contenv:ro -v %s:/fork-marker %s",
 		shSingleQuote(name),
@@ -321,9 +323,6 @@ EOS
 		shSingleQuote(dir),
 		shSingleQuote(image),
 	))
-	t.Cleanup(func() {
-		s.Env().RemoteHost.MustExecuteOn(t, "docker rm -fv "+shSingleQuote(name))
-	})
 
 	require.EventuallyWithT(t, func(c *assert.CollectT) {
 		logs := s.Env().RemoteHost.MustExecuteOn(c, "docker logs "+shSingleQuote(name)+" 2>&1")
@@ -348,6 +347,7 @@ func (s *procmgrAIODockerSuite) TestCustomServiceStarts() {
 		s.Env().RemoteHost.MustExecuteOn(t, "rm -rf "+shSingleQuote(dir))
 	})
 
+	s.removeContainerNowAndOnCleanup(t, name)
 	s.Env().RemoteHost.MustExecute(fmt.Sprintf(
 		"docker run -d --name %s -e DD_API_KEY=%s -e DD_HOSTNAME=%s -v %s:/etc/services.d/%s:ro %s",
 		shSingleQuote(name),
@@ -357,9 +357,6 @@ func (s *procmgrAIODockerSuite) TestCustomServiceStarts() {
 		aioCustomService,
 		shSingleQuote(image),
 	))
-	t.Cleanup(func() {
-		s.Env().RemoteHost.MustExecuteOn(t, "docker rm -fv "+shSingleQuote(name))
-	})
 
 	require.EventuallyWithT(t, func(c *assert.CollectT) {
 		logs := s.Env().RemoteHost.MustExecuteOn(c, "docker logs "+shSingleQuote(name)+" 2>&1")
@@ -413,6 +410,7 @@ EOS
 		s.Env().RemoteHost.MustExecuteOn(t, "rm -rf "+shSingleQuote(dir))
 	})
 
+	s.removeContainerNowAndOnCleanup(t, name)
 	s.Env().RemoteHost.MustExecute(fmt.Sprintf(
 		"docker run -d --name %s -e DD_API_KEY=%s -e DD_HOSTNAME=%s -e S6_KEEP_ENV=0 -e AIO_CONTENV_VALUE=from-container -v %s:/etc/services.d/%s:ro -v %s:/marker %s",
 		shSingleQuote(name),
@@ -423,9 +421,6 @@ EOS
 		shSingleQuote(dir+"/marker"),
 		shSingleQuote(image),
 	))
-	t.Cleanup(func() {
-		s.Env().RemoteHost.MustExecuteOn(t, "docker rm -fv "+shSingleQuote(name))
-	})
 
 	describe := func(c require.TestingT) string {
 		stdout, stderr, err := s.Env().Docker.Client.ExecuteCommandStdoutStdErr(
@@ -481,6 +476,7 @@ EOS
 	t.Cleanup(func() {
 		s.Env().RemoteHost.MustExecuteOn(t, "rm -rf "+shSingleQuote(dir))
 	})
+	s.removeContainerNowAndOnCleanup(t, name)
 	s.Env().RemoteHost.MustExecute(fmt.Sprintf(
 		"docker run -d --name %s -e DD_API_KEY=%s -e DD_HOSTNAME=%s -v %s:/etc/services.d/trace:ro %s",
 		shSingleQuote(name),
@@ -489,9 +485,6 @@ EOS
 		shSingleQuote(dir),
 		shSingleQuote(image),
 	))
-	t.Cleanup(func() {
-		s.Env().RemoteHost.MustExecuteOn(t, "docker rm -fv "+shSingleQuote(name))
-	})
 
 	run := func(c require.TestingT, args ...string) string {
 		stdout, stderr, err := s.Env().Docker.Client.ExecuteCommandStdoutStdErr(
@@ -532,6 +525,7 @@ func (s *procmgrAIODockerSuite) TestNonRootUserRunsProcmgr() {
 	name := "aio-nonroot"
 
 	t := s.T()
+	s.removeContainerNowAndOnCleanup(t, name)
 	s.Env().RemoteHost.MustExecute(fmt.Sprintf(
 		"docker run -d --name %s --user 100:0 -e DD_API_KEY=%s -e DD_HOSTNAME=%s %s",
 		shSingleQuote(name),
@@ -539,13 +533,11 @@ func (s *procmgrAIODockerSuite) TestNonRootUserRunsProcmgr() {
 		shSingleQuote(aioBareHostname),
 		shSingleQuote(image),
 	))
-	t.Cleanup(func() {
-		s.Env().RemoteHost.MustExecuteOn(t, "docker rm -fv "+shSingleQuote(name))
-	})
 
 	require.EventuallyWithT(t, func(c *assert.CollectT) {
 		pid := strings.TrimSpace(s.Env().RemoteHost.MustExecuteOn(c,
 			"docker inspect -f '{{.State.Pid}}' "+shSingleQuote(name)))
+		requireHostPID(c, pid)
 		comm := strings.TrimSpace(s.Env().RemoteHost.MustExecuteOn(c, "cat /proc/"+pid+"/comm"))
 		assert.Equal(c, "dd-procmgrd", comm, "a non-root container should run dd-procmgrd, not fall back to s6")
 		stdout, stderr, err := s.Env().Docker.Client.ExecuteCommandStdoutStdErr(
@@ -580,6 +572,7 @@ EOS
 	t.Cleanup(func() {
 		s.Env().RemoteHost.MustExecuteOn(t, "rm -rf "+shSingleQuote(dir))
 	})
+	s.removeContainerNowAndOnCleanup(t, name)
 	s.Env().RemoteHost.MustExecute(fmt.Sprintf(
 		"docker run -d --name %s -e DD_API_KEY=%s -e DD_HOSTNAME=%s -v %s:/etc/cont-init.d/90-block:ro -v %s:/fork-marker %s",
 		shSingleQuote(name),
@@ -589,9 +582,6 @@ EOS
 		shSingleQuote(dir),
 		shSingleQuote(image),
 	))
-	t.Cleanup(func() {
-		s.Env().RemoteHost.MustExecuteOn(t, "docker rm -fv "+shSingleQuote(name))
-	})
 
 	require.EventuallyWithT(t, func(c *assert.CollectT) {
 		logs := s.Env().RemoteHost.MustExecuteOn(c, "docker logs "+shSingleQuote(name)+" 2>&1")
@@ -630,6 +620,7 @@ EOS
 	t.Cleanup(func() {
 		s.Env().RemoteHost.MustExecuteOn(t, "rm -rf "+shSingleQuote(dir))
 	})
+	s.removeContainerNowAndOnCleanup(t, name)
 	s.Env().RemoteHost.MustExecute(fmt.Sprintf(
 		"docker run -d --name %s -e DD_API_KEY=%s -e DD_HOSTNAME=%s -v %s:/etc/cont-init.d/90-block:ro -v %s:/fork-marker %s",
 		shSingleQuote(name),
@@ -639,9 +630,6 @@ EOS
 		shSingleQuote(dir),
 		shSingleQuote(image),
 	))
-	t.Cleanup(func() {
-		s.Env().RemoteHost.MustExecuteOn(t, "docker rm -fv "+shSingleQuote(name))
-	})
 
 	require.EventuallyWithT(t, func(c *assert.CollectT) {
 		logs := s.Env().RemoteHost.MustExecuteOn(c, "docker logs "+shSingleQuote(name)+" 2>&1")
@@ -682,6 +670,7 @@ EOS
 	t.Cleanup(func() {
 		s.Env().RemoteHost.MustExecuteOn(t, "rm -rf "+shSingleQuote(dir))
 	})
+	s.removeContainerNowAndOnCleanup(t, name)
 	s.Env().RemoteHost.MustExecute(fmt.Sprintf(
 		"docker run -d --name %s -e DD_API_KEY=%s -e DD_HOSTNAME=%s -v %s:/etc/cont-init.d/90-block:ro -v %s:/fork-marker %s",
 		shSingleQuote(name),
@@ -691,9 +680,6 @@ EOS
 		shSingleQuote(dir),
 		shSingleQuote(image),
 	))
-	t.Cleanup(func() {
-		s.Env().RemoteHost.MustExecuteOn(t, "docker rm -fv "+shSingleQuote(name))
-	})
 
 	require.EventuallyWithT(t, func(c *assert.CollectT) {
 		logs := s.Env().RemoteHost.MustExecuteOn(c, "docker logs "+shSingleQuote(name)+" 2>&1")
@@ -728,6 +714,7 @@ func (s *procmgrAIODockerSuite) TestOptInEntrypointRunsProcmgrd() {
 	name := "aio-opt-in-entrypoint"
 
 	t := s.T()
+	s.removeContainerNowAndOnCleanup(t, name)
 	s.Env().RemoteHost.MustExecute(fmt.Sprintf(
 		"docker run -d --name %s -e ENTRYPOINT=procmgr-all-in-one -e DD_API_KEY=%s -e DD_HOSTNAME=%s %s",
 		shSingleQuote(name),
@@ -735,9 +722,6 @@ func (s *procmgrAIODockerSuite) TestOptInEntrypointRunsProcmgrd() {
 		shSingleQuote(aioBareHostname),
 		shSingleQuote(image),
 	))
-	t.Cleanup(func() {
-		s.Env().RemoteHost.MustExecuteOn(t, "docker rm -fv "+shSingleQuote(name))
-	})
 
 	// The main process is bash until cont-init finishes and the entrypoint execs dd-procmgrd.
 	require.EventuallyWithT(t, func(c *assert.CollectT) {
@@ -799,6 +783,16 @@ func (s *procmgrAIODockerSuite) agentImage(t require.TestingT) string {
 	}
 	return strings.TrimSpace(s.Env().RemoteHost.MustExecuteOn(t,
 		"docker inspect -f '{{.Config.Image}}' "+aioAgentContainer))
+}
+
+// removeContainerNowAndOnCleanup removes a container left by an interrupted earlier run, so a
+// fixed name does not collide, and removes it again when the test ends.
+func (s *procmgrAIODockerSuite) removeContainerNowAndOnCleanup(t *testing.T, name string) {
+	remove := "docker rm -fv " + shSingleQuote(name) + " >/dev/null 2>&1 || true"
+	s.Env().RemoteHost.MustExecuteOn(t, remove)
+	t.Cleanup(func() {
+		s.Env().RemoteHost.MustExecuteOn(t, remove)
+	})
 }
 
 func requireHostPID(t require.TestingT, pid string) {

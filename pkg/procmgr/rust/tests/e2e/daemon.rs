@@ -3,9 +3,9 @@
 // This product includes software developed at Datadog (https://www.datadoghq.com/).
 // Copyright 2026-present Datadog, Inc.
 
-use crate::helpers::{
-    DaemonHandle, StatusProcessesCount, TestEnv, pid_is_alive, wait_for_pid_gone,
-};
+#[cfg(unix)]
+use crate::helpers::DaemonHandle;
+use crate::helpers::{StatusProcessesCount, TestEnv, pid_is_alive, wait_for_pid_gone};
 use dd_procmgrd::test_helpers;
 use std::time::Duration;
 
@@ -94,14 +94,18 @@ fn test_cli_daemon_shutdown_during_startup_exits_cleanly() {
         .with_config(
             "gated",
             &format!(
-                "command: /usr/bin/true\nauto_start: true\ncondition_config_any:\n  - path: {}\n    keys:\n      - apm_config.enabled\n",
+                "command: {}\nauto_start: true\ncondition_config_any:\n  - path: {}\n    keys:\n      - apm_config.enabled\n",
+                test_helpers::true_cmd().0,
                 gate.display()
             ),
         )
         // Ordered after the gated process, so the start pass reaches it only after the gate.
         .with_config(
             "later",
-            "command: /usr/bin/true\nauto_start: true\nafter:\n  - gated\n",
+            &format!(
+                "command: {}\nauto_start: true\nafter:\n  - gated\n",
+                test_helpers::true_cmd().0
+            ),
         );
     // A helper thread opens the FIFO for writing. The blocking open returns once the daemon
     // opens it for reading, and the daemon's gate read then waits until the thread drops the
@@ -193,8 +197,11 @@ fn test_cli_daemon_shutdown_during_catalog_load_starts_nothing() {
             .expect("open catalog fifo for writing");
         let _ = opened_tx.send(());
         let _ = release_rx.recv();
-        let _ =
-            std::io::Write::write_all(&mut writer, b"command: /usr/bin/true\nauto_start: true\n");
+        let config = format!(
+            "command: {}\nauto_start: true\n",
+            test_helpers::true_cmd().0
+        );
+        let _ = std::io::Write::write_all(&mut writer, config.as_bytes());
     });
 
     let socket = env.env_root().join("daemon.sock");

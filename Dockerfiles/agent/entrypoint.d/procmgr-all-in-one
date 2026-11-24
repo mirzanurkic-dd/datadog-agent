@@ -14,6 +14,14 @@ stage_executes() {
     return "$status"
 }
 
+# Removes a staging tree. A script or service can leave a directory the owner cannot write or
+# search, so the owner gets both first. chmod -R follows a link given as its operand, so a link
+# left on the volume is only removed.
+remove_tree() {
+    [[ -L "$1" ]] || chmod -R u+rwX -- "$1" 2>/dev/null || true
+    rm -rf -- "$1"
+}
+
 # Custom services run the scripts copied into the staged directory, so it must allow exec.
 # Shipped down markers only write YAML there, so a writable directory is enough for them.
 stage_for_configs() {
@@ -55,14 +63,14 @@ on_term() {
     exit 143
 }
 trap on_term TERM INT
-trap 'if [[ -n "$cleanup_dir" ]]; then chmod -R u+w "$cleanup_dir" 2>/dev/null || true; rm -rf "$cleanup_dir" 2>/dev/null || true; fi' EXIT
+trap 'if [[ -n "$cleanup_dir" ]]; then remove_tree "$cleanup_dir" 2>/dev/null || true; fi' EXIT
 
 copy_dir=
 primary=/var/run/s6/procmgr-cont-init.d
-if rm -rf "$primary" 2>/dev/null && mkdir "$primary" 2>/dev/null && stage_executes "$primary"; then
+if remove_tree "$primary" 2>/dev/null && mkdir "$primary" 2>/dev/null && stage_executes "$primary"; then
     copy_dir=$primary
 else
-    rm -rf "$primary" 2>/dev/null || true
+    remove_tree "$primary" 2>/dev/null || true
 fi
 if [[ -z "$copy_dir" ]]; then
     for parent in "${TMPDIR:-/tmp}" /opt/datadog-agent/run; do
@@ -75,7 +83,7 @@ if [[ -z "$copy_dir" ]]; then
         if stage_executes "$candidate"; then
             break
         fi
-        rm -rf "$candidate"
+        remove_tree "$candidate"
         cleanup_dir=""
         copy_dir=""
     done
@@ -118,7 +126,7 @@ for init in "${selected[@]}"; do
 done
 # A successful exec does not run the EXIT trap, so remove the cont-init fallback here.
 # A custom-service fallback is set afterwards and must survive exec.
-if [[ "$copy_dir" != "$primary" ]]; then rm -rf "$copy_dir"; cleanup_dir=""; fi
+if [[ "$copy_dir" != "$primary" ]]; then remove_tree "$copy_dir"; cleanup_dir=""; fi
 
 # Shipped directories are already in the aio catalog, so they are not started again. A down
 # file in one keeps its catalog process stopped, so the staged catalog copy is edited below.
@@ -164,10 +172,10 @@ export DD_PM_CONFIG_DIR=/opt/datadog-agent/processes.d/aio
 if [[ ${#custom_services[@]} -gt 0 || ${#shipped_down[@]} -gt 0 ]]; then
     processes_dir=
     processes_primary=/var/run/s6/procmgr-processes.d
-    if rm -rf "$processes_primary" 2>/dev/null && mkdir "$processes_primary" 2>/dev/null && stage_for_configs "$processes_primary"; then
+    if remove_tree "$processes_primary" 2>/dev/null && mkdir "$processes_primary" 2>/dev/null && stage_for_configs "$processes_primary"; then
         processes_dir=$processes_primary
     else
-        rm -rf "$processes_primary" 2>/dev/null || true
+        remove_tree "$processes_primary" 2>/dev/null || true
         for parent in "${TMPDIR:-/tmp}" /opt/datadog-agent/run; do
             if ! candidate=$(mktemp -d "$parent/procmgr-processes.d.XXXXXX" 2>/dev/null); then
                 continue
@@ -175,7 +183,7 @@ if [[ ${#custom_services[@]} -gt 0 || ${#shipped_down[@]} -gt 0 ]]; then
             # A relative TMPDIR gives a relative path. A service starts in its own directory and
             # the cleanup check needs an absolute path, so resolve it before anything uses it.
             if ! candidate_abs=$(CDPATH='' cd -P -- "$candidate" 2>/dev/null && pwd -P); then
-                rm -rf "$candidate" 2>/dev/null || true
+                remove_tree "$candidate" 2>/dev/null || true
                 continue
             fi
             candidate=$candidate_abs
@@ -184,7 +192,7 @@ if [[ ${#custom_services[@]} -gt 0 || ${#shipped_down[@]} -gt 0 ]]; then
                 processes_dir=$candidate
                 break
             fi
-            rm -rf "$candidate"
+            remove_tree "$candidate"
             cleanup_dir=""
         done
     fi
@@ -218,15 +226,17 @@ if [[ ${#custom_services[@]} -gt 0 || ${#shipped_down[@]} -gt 0 ]]; then
             continue
         fi
         stage="$processes_dir/services/$service_name"
-        if ! cp -RL -- "$service_dir" "$stage"; then
+        # Links inside the service are kept as links, so one pointing at a large or stalled tree
+        # is not copied. -H still follows a service directory that is itself a link. A read-only
+        # source can be mode 0555, and chmod -R skips links, so it never reaches the source. run
+        # alone is then copied through its link, so the chmod 0755 below does not either.
+        if ! cp -RH -- "$service_dir" "$stage" || ! chmod -R u+rwX "$stage" \
+            || ! rm -f "$stage/run" || ! cp -L -- "$service_dir/run" "$stage/run"; then
             echo "skipping /etc/services.d/$service_name: copy failed" >&2
-            chmod -R u+w "$stage" 2>/dev/null || true
-            rm -rf "$stage" 2>/dev/null || true
+            remove_tree "$stage" 2>/dev/null || true
             continue
         fi
         chmod 0755 "$stage/run"
-        # A read-only source can be mode 0555. The owner still has to be able to remove the copy.
-        chmod -R u+w "$stage"
         auto_start=true
         if [[ -e "$service_dir/down" ]]; then
             auto_start=false
