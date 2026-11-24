@@ -7,7 +7,7 @@ use crate::helpers::{
     DaemonHandle, StatusProcessesCount, TestEnv, pid_is_alive, wait_for_pid_gone,
 };
 use dd_procmgrd::test_helpers;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 #[test]
 fn daemon_starts_ready() {
@@ -74,7 +74,8 @@ fn test_cli_daemon_shutdown_stops_children() {
     );
 }
 
-/// A SIGTERM during startup must end the daemon cleanly. The FIFO gate holds startup open.
+/// A SIGTERM during startup must end the daemon cleanly and start nothing after the gate. The FIFO
+/// gate holds startup open.
 #[cfg(unix)]
 #[test]
 fn test_cli_daemon_shutdown_during_startup_exits_cleanly() {
@@ -89,42 +90,53 @@ fn test_cli_daemon_shutdown_during_startup_exits_cleanly() {
         0,
         "mkfifo failed"
     );
-    let env = env.with_config(
-        "gated",
-        &format!(
-            "command: /usr/bin/true\nauto_start: true\ncondition_config_any:\n  - path: {}\n    keys:\n      - apm_config.enabled\n",
-            gate.display()
-        ),
-    );
+    let env = env
+        .with_config(
+            "gated",
+            &format!(
+                "command: /usr/bin/true\nauto_start: true\ncondition_config_any:\n  - path: {}\n    keys:\n      - apm_config.enabled\n",
+                gate.display()
+            ),
+        )
+        // Ordered after the gated process, so the start pass reaches it only after the gate.
+        .with_config(
+            "later",
+            "command: /usr/bin/true\nauto_start: true\nafter:\n  - gated\n",
+        );
     // A helper thread opens the FIFO for writing. The blocking open returns once the daemon
     // opens it for reading, and the daemon's gate read then waits until the thread drops the
     // writer. Dropping it early would leave a daemon that has not opened yet blocked forever.
     let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let (opened_tx, opened_rx) = std::sync::mpsc::channel::<()>();
     let writer_path = gate.clone();
-    std::thread::spawn(move || {
-        let writer = std::fs::OpenOptions::new()
+    let writer = std::thread::spawn(move || {
+        let mut writer = std::fs::OpenOptions::new()
             .write(true)
             .open(&writer_path)
             .expect("open gate fifo for writing");
+        let _ = opened_tx.send(());
         let _ = release_rx.recv();
+        // Open the gate, so "gated" would start if the daemon did not check for the stop.
+        std::io::Write::write_all(&mut writer, b"apm_config:\n  enabled: true\n")
+            .expect("write gate");
         drop(writer);
     });
     let socket = env.env_root().join("daemon.sock");
     let mut daemon = DaemonHandle::start(env.config_dir(), &socket);
+    // The open returns once the daemon reads the gate, so SIGTERM lands while the read is blocked.
+    opened_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("daemon never opened the gate fifo");
 
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !socket.exists() {
-        assert!(Instant::now() < deadline, "daemon socket never appeared");
-        std::thread::sleep(Duration::from_millis(20));
-    }
     daemon.send_signal(Signal::SIGTERM);
     // Give the signal time to land while start() is still blocked on the gate.
     std::thread::sleep(Duration::from_millis(200));
     if let Some(status) = daemon.try_exit_status() {
         panic!("daemon exited before the gate was released: {status:?}");
     }
-    // Closing the writer gives the daemon EOF, so the gate resolves and startup finishes.
+    // Releasing the writer writes the gate and closes it, so the read resolves.
     let _ = release_tx.send(());
+    writer.join().expect("writer thread panicked");
 
     let status = daemon
         .wait_for_exit(Duration::from_secs(10))
@@ -135,6 +147,26 @@ fn test_cli_daemon_shutdown_during_startup_exits_cleanly() {
         "daemon should exit 0, got {status:?}"
     );
     assert_eq!(status.signal(), None, "daemon was killed by a signal");
+    assert!(
+        daemon.wait_for_log("dd-procmgrd stopped (exit code 0)", Duration::from_secs(10)),
+        "daemon did not log its final stop line"
+    );
+    // The gate opened, so "gated" would have started without the check after the gate read.
+    assert_eq!(
+        daemon.count_log_matches("[gated] spawned"),
+        0,
+        "a gated process started after a stop during the start pass"
+    );
+    assert_eq!(
+        daemon.count_log_matches("[later] spawned"),
+        0,
+        "a process after the gate started after a stop during the start pass"
+    );
+    assert_eq!(
+        daemon.count_log_matches("stop requested during startup"),
+        1,
+        "the pending stop should end the start pass"
+    );
 }
 
 /// A SIGTERM while the catalog loads must start nothing. A FIFO catalog entry blocks the loader.

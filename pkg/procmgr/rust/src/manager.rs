@@ -19,6 +19,7 @@ use log::{debug, info, warn};
 use std::collections::HashSet;
 use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use tokio::sync::{RwLock, mpsc, oneshot};
@@ -82,11 +83,29 @@ impl ProcessManager {
         }
     }
 
+    #[cfg(test)]
     async fn start(&self, exit_tx: &mpsc::Sender<ExitEvent>) {
+        let mut never = std::pin::pin!(std::future::pending::<()>());
+        self.start_until(exit_tx, &mut never).await;
+    }
+
+    /// Starts the auto-start processes. Returns true if `shutdown` resolved first. The pass then
+    /// stops, and processes it did not reach stay `Created`.
+    async fn start_until<F: Future<Output = ()>>(
+        &self,
+        exit_tx: &mpsc::Sender<ExitEvent>,
+        shutdown: &mut Pin<&mut F>,
+    ) -> bool {
         let order = self.startup_order.read().await;
         let mut procs = self.processes.write().await;
-        let decided = self.run_start_pass(&mut procs, &order, exit_tx, |_| true);
+        let Some(decided) = self
+            .run_start_pass(&mut procs, &order, exit_tx, |_| true, shutdown)
+            .await
+        else {
+            return true;
+        };
         finalize_start_holds(&mut procs, &order, &decided);
+        false
     }
 
     fn spawn_process(
@@ -143,12 +162,7 @@ impl ProcessManager {
 
         // A stop that arrived while the catalog loaded returns before anything is bound or
         // spawned. Poll once without waiting.
-        let stop_pending = tokio::select! {
-            biased;
-            _ = &mut shutdown => true,
-            _ = std::future::ready(()) => false,
-        };
-        if stop_pending {
+        if stop_requested(&mut shutdown).await {
             self.shutting_down.store(true, Ordering::SeqCst);
             info!("stop requested before startup, not starting processes");
             return finish_run(None, 0).await;
@@ -161,9 +175,11 @@ impl ProcessManager {
 
         let (exit_tx, mut exit_rx) = mpsc::channel::<ExitEvent>(256);
         let (restart_tx, mut restart_rx) = mpsc::channel::<String>(256);
-        self.start(&exit_tx).await;
-
-        let mut external_shutdown = false;
+        let mut external_shutdown = self.start_until(&exit_tx, &mut shutdown).await;
+        if external_shutdown {
+            self.shutting_down.store(true, Ordering::SeqCst);
+            info!("stop requested during startup, not starting the remaining processes");
+        }
         while !external_shutdown {
             if self.supervisor_exit_code().is_some() {
                 break;
@@ -360,7 +376,9 @@ impl ProcessManager {
         {
             let order = self.startup_order.read().await;
             let mut procs = self.processes.write().await;
-            let decided = self.run_start_pass(&mut procs, &order, exit_tx, |p| p.name() == name);
+            let decided = self
+                .run_start_pass_uninterrupted(&mut procs, &order, exit_tx, |p| p.name() == name)
+                .await;
             finalize_start_holds(&mut procs, &order, &decided);
         }
         Ok(CreateResult { uuid, warnings })
@@ -748,9 +766,11 @@ impl ProcessManager {
                 pending_restart.iter().map(String::as_str).collect();
             let order = self.startup_order.read().await;
             let mut procs = self.processes.write().await;
-            let mut decided = self.run_start_pass(&mut procs, &order, exit_tx, |p| {
-                added_names.contains(p.name()) || recovered_names.contains(p.name())
-            });
+            let mut decided = self
+                .run_start_pass_uninterrupted(&mut procs, &order, exit_tx, |p| {
+                    added_names.contains(p.name()) || recovered_names.contains(p.name())
+                })
+                .await;
             for &idx in order.iter() {
                 let proc = &mut procs[idx];
                 if !pending_restart_names.contains(proc.name()) {
@@ -858,20 +878,31 @@ impl ProcessManager {
         shutdown::shutdown_ordered(&mut procs, &order).await;
     }
 
-    fn run_start_pass(
+    /// Evaluates each selected process's start gate and spawns it unless a hold applies. Returns
+    /// `None` if `shutdown` resolves first. It is polled before each process and again after the
+    /// gate read, because a FIFO gate can block that read until a writer releases it.
+    async fn run_start_pass<F: Future<Output = ()>>(
         &self,
         procs: &mut [ManagedProcess],
         order: &[usize],
         exit_tx: &mpsc::Sender<ExitEvent>,
         selected: impl Fn(&ManagedProcess) -> bool,
-    ) -> HashSet<usize> {
+        shutdown: &mut Pin<&mut F>,
+    ) -> Option<HashSet<usize>> {
         let mut decided = HashSet::new();
         for &idx in order {
+            if stop_requested(shutdown).await {
+                return None;
+            }
             let proc = &mut procs[idx];
             if !selected(proc) {
                 continue;
             }
             let holds = proc.evaluate_start_pass();
+            // The gate read can block, so check again before acting on its result.
+            if stop_requested(shutdown).await {
+                return None;
+            }
             if holds.is_empty() {
                 if let Err(e) = self.spawn_process(proc, exit_tx) {
                     warn!("{e:#}");
@@ -881,7 +912,30 @@ impl ProcessManager {
             }
             decided.insert(idx);
         }
-        decided
+        Some(decided)
+    }
+
+    /// Start pass for create and reload, which a stop request does not interrupt.
+    async fn run_start_pass_uninterrupted(
+        &self,
+        procs: &mut [ManagedProcess],
+        order: &[usize],
+        exit_tx: &mpsc::Sender<ExitEvent>,
+        selected: impl Fn(&ManagedProcess) -> bool,
+    ) -> HashSet<usize> {
+        let mut never = std::pin::pin!(std::future::pending::<()>());
+        self.run_start_pass(procs, order, exit_tx, selected, &mut never)
+            .await
+            .expect("a pending future never requests a stop")
+    }
+}
+
+/// Polls `shutdown` once without waiting. Returns true if it has resolved.
+async fn stop_requested<F: Future<Output = ()>>(shutdown: &mut Pin<&mut F>) -> bool {
+    tokio::select! {
+        biased;
+        _ = shutdown.as_mut() => true,
+        _ = std::future::ready(()) => false,
     }
 }
 
