@@ -10,6 +10,7 @@ package sender
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"fmt"
 	"hash/fnv"
@@ -374,13 +375,15 @@ func (d *directSender) collect() {
 		defer dsc.cleanupProcesses()
 	}
 
-	d.npCollector.ScheduleNetworkPathTests(d.networkPathConnections(conns))
+	sortConnections(conns.Conns)
+
+	networkPaths := d.npCollector.ScheduleNetworkPathTests(d.hostname, d.networkPathConnections(conns))
 
 	groupID := d.groupID.Add(1)
 
 	allBatches := result{payloads: make([]payload, 0, d.batchCount(conns))}
 	messageIndex := 0
-	for body := range d.batches(conns, groupID) {
+	for body := range d.batches(conns, groupID, networkPaths) {
 		extraHeaders := d.staticHeaders.Clone()
 		extraHeaders.Set(headers.TimestampHeader, strconv.Itoa(int(start.Unix())))
 		requestID := d.getRequestID(start, messageIndex)
@@ -403,7 +406,7 @@ func (d *directSender) collect() {
 	senderTelemetry.queueBytes.Set(float64(d.resultsQueue.Weight()))
 }
 
-func (d *directSender) batches(conns *network.Connections, groupID int32) iter.Seq[[]byte] {
+func (d *directSender) batches(conns *network.Connections, groupID int32, networkPaths []model.NetworkPath) iter.Seq[[]byte] {
 	messageIndex := 0
 	numBatches := d.batchCount(conns)
 	dnsEncoder := model.NewV2DNSEncoder()
@@ -466,6 +469,7 @@ func (d *directSender) batches(conns *network.Connections, groupID int32) iter.S
 		defer d.resolver.removeDeadTagContainers()
 		defer d.trimCompressScratch()
 
+		connIndex := 0
 		for connsChunk := range slices.Chunk(conns.Conns, d.maxConnsPerMessage) {
 			d.rawBuf.Reset()
 			builder.Reset(&d.rawBuf)
@@ -489,8 +493,13 @@ func (d *directSender) batches(conns *network.Connections, groupID int32) iter.S
 
 			for i := range connsChunk {
 				nc := &connsChunk[i]
+				var networkPath *model.NetworkPath
+				if connIndex < len(networkPaths) {
+					networkPath = &networkPaths[connIndex]
+				}
+				connIndex++
 				builder.AddConnections(func(builder *model.ConnectionBuilder) {
-					d.encodeConnection(builder, nc, conns, routeSet, resolvConfSet)
+					d.encodeConnection(builder, nc, conns, routeSet, resolvConfSet, networkPath)
 					d.addContainerTags(builder, nc.ContainerID.Source, tagsEncoder, tagCache)
 					d.addRemoteServiceTags(builder, nc, remoteServiceResolver, tagsEncoder)
 					d.addTags(builder, nc, tagsSet, usmEncoders, connectionsTagsEncoder, tagCache)
@@ -668,20 +677,26 @@ func addConnectionListeners(listeners map[listenKey]int32, conns []network.Conne
 	}
 }
 
+func compareConnections(a, b *network.ConnectionStats) int {
+	return cmp.Or(a.Dest.Addr.Compare(b.Dest.Addr), cmp.Compare(a.Pid, b.Pid))
+}
+
 // sortConnections sorts conns by remote IP, then PID. It sorts an index slice and then permutes
 // conns in place, so each ConnectionStats is moved once instead of on every swap. The resulting
 // order is the same as sorting conns directly with the same comparison.
 func sortConnections(conns []network.ConnectionStats) {
+	if slices.IsSortedFunc(conns, func(a, b network.ConnectionStats) int {
+		return compareConnections(&a, &b)
+	}) {
+		return
+	}
+
 	idx := make([]int32, len(conns))
 	for i := range idx {
 		idx[i] = int32(i)
 	}
 	slices.SortFunc(idx, func(i, j int32) int {
-		a, b := &conns[i], &conns[j]
-		if a.Dest.Addr != b.Dest.Addr {
-			return a.Dest.Addr.Compare(b.Dest.Addr)
-		}
-		return int(a.Pid) - int(b.Pid)
+		return compareConnections(&conns[i], &conns[j])
 	})
 
 	// position i takes conns[idx[i]]; follow each cycle once, marking visited positions with -1
