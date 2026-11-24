@@ -16,6 +16,7 @@ import (
 	"hash"
 	"io"
 	"io/fs"
+	"math"
 	"os"
 	"slices"
 	"strings"
@@ -39,8 +40,199 @@ import (
 const (
 	// minSSDeepFileSize is the minimum file size (in bytes) required by ssdeep to produce a digest.
 	// glaslos/ssdeep returns ErrFileTooSmall when totalSize <= 4096 and Force is false.
-	minSSDeepFileSize = 4096
+	minSSDeepFileSize    = 4096
+	ssdeepRollingWindow  = 7
+	ssdeepBlockMin       = 3
+	ssdeepSpamSumLength  = 64
+	ssdeepHalfSpamSumLen = ssdeepSpamSumLength / 2
+	ssdeepNumBlockhashes = 31
+	ssdeepMaxTotalSize   = ssdeepBlockMin << (ssdeepNumBlockhashes - 1) * ssdeepSpamSumLength
+	ssdeepHashPrime      = 0x93
+	ssdeepHashInit       = 0x27
+	ssdeepB64String      = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 )
+
+type fastSSDeepBlock struct {
+	hashString         []byte
+	blockSize          uint32
+	tail1, tail2       byte
+	hasTail1, hasTail2 bool
+}
+
+type fastSSDeepHasher struct {
+	window       [ssdeepRollingWindow + 1]byte
+	h1, h2, h3   uint32
+	n            uint32
+	iStart, iEnd int
+	totalSize    uint64
+	bsizeMask    uint32
+	blockHash1   [ssdeepNumBlockhashes]byte
+	blockHash2   [ssdeepNumBlockhashes]byte
+	blocks       [ssdeepNumBlockhashes]fastSSDeepBlock
+}
+
+func newFastSSDeepHasher() *fastSSDeepHasher {
+	s := &fastSSDeepHasher{
+		iEnd: 1,
+	}
+	s.Reset()
+	return s
+}
+
+func (s *fastSSDeepHasher) Reset() {
+	*s = fastSSDeepHasher{
+		iEnd: 1,
+	}
+	for i := range s.blocks {
+		s.blocks[i].blockSize = ssdeepBlockMin << i
+		s.blockHash1[i] = ssdeepHashInit
+		s.blockHash2[i] = ssdeepHashInit
+	}
+}
+
+func (s *fastSSDeepHasher) BlockSize() int {
+	return ssdeepBlockMin
+}
+
+func (s *fastSSDeepHasher) Size() int {
+	return ssdeepSpamSumLength
+}
+
+func (s *fastSSDeepHasher) Write(p []byte) (int, error) {
+	s.totalSize += uint64(len(p))
+	h1, h2, h3, n := s.h1, s.h2, s.h3, s.n
+	window := s.window
+	iStart, iEnd := s.iStart, s.iEnd
+	bsizeMask := s.bsizeMask
+	bh1 := &s.blockHash1
+	bh2 := &s.blockHash2
+
+	for _, b := range p {
+		for i := iStart; i < iEnd; i++ {
+			bh1[i] = ((bh1[i] * ssdeepHashPrime) ^ b) & 63
+			bh2[i] = ((bh2[i] * ssdeepHashPrime) ^ b) & 63
+		}
+
+		bc := uint32(b)
+		h2 -= h1
+		h2 += ssdeepRollingWindow * bc
+		h1 += bc
+		h1 -= uint32(window[n])
+		window[n] = b
+		n++
+		if n == ssdeepRollingWindow {
+			n = 0
+		}
+		h3 = (h3 << 5) ^ bc
+
+		rh := h1 + h2 + h3
+		if rh == math.MaxUint32 || ((rh+1)/ssdeepBlockMin)&bsizeMask > 0 || (rh+1)%ssdeepBlockMin > 0 {
+			continue
+		}
+		s.triggerBoundary(rh)
+		iStart, iEnd, bsizeMask = s.iStart, s.iEnd, s.bsizeMask
+	}
+
+	s.h1, s.h2, s.h3, s.n = h1, h2, h3, n
+	s.window = window
+	return len(p), nil
+}
+
+func (s *fastSSDeepHasher) triggerBoundary(rh uint32) {
+	for i := s.iStart; i < s.iEnd; i++ {
+		block := &s.blocks[i]
+		if rh%block.blockSize == (block.blockSize - 1) {
+			if len(block.hashString) == 0 {
+				if s.iEnd <= ssdeepNumBlockhashes-1 {
+					s.blockHash1[s.iEnd] = s.blockHash1[s.iEnd-1]
+					s.blockHash2[s.iEnd] = s.blockHash2[s.iEnd-1]
+					s.iEnd++
+				}
+			}
+			block.tail1 = s.blockHash1[i]
+			block.tail2 = s.blockHash2[i]
+			if len(block.hashString) < ssdeepSpamSumLength-1 {
+				block.hashString = append(block.hashString, block.tail1)
+				block.tail1 = 0
+				block.hasTail1 = false
+				s.blockHash1[i] = ssdeepHashInit
+				if len(block.hashString) < ssdeepHalfSpamSumLen {
+					s.blockHash2[i] = ssdeepHashInit
+					block.tail2 = 0
+					block.hasTail2 = false
+				} else {
+					block.hasTail2 = true
+				}
+			} else {
+				block.hasTail1 = true
+				block.hasTail2 = true
+				if s.totalSize > uint64(s.blocks[s.iStart].blockSize*ssdeepSpamSumLength) &&
+					len(s.blocks[s.iStart+1].hashString) >= ssdeepHalfSpamSumLen {
+					s.iStart++
+					s.bsizeMask = (s.bsizeMask << 1) + 1
+				}
+			}
+		}
+	}
+}
+
+func (s *fastSSDeepHasher) Sum(b []byte) []byte {
+	return append(b, s.digest()...)
+}
+
+func (s *fastSSDeepHasher) digest() string {
+	if !ssdeep.Force && s.totalSize <= minSSDeepFileSize {
+		return ""
+	}
+	if s.totalSize > ssdeepMaxTotalSize {
+		return ""
+	}
+
+	i := s.iStart
+	for ; uint64(uint32(ssdeepBlockMin)<<i)*ssdeepSpamSumLength < s.totalSize; i++ {
+	}
+
+	if i >= s.iEnd {
+		i = s.iEnd - 1
+	}
+	for i > s.iStart && len(s.blocks[i].hashString) < ssdeepHalfSpamSumLen {
+		i--
+	}
+	bl1 := s.blocks[i]
+	bl1Hash := s.blockHash1[i]
+	bl2 := s.blocks[i+1]
+	bl2Hash := s.blockHash2[i+1]
+	if i >= s.iEnd-1 {
+		bl2 = s.blocks[i]
+		bl2.hashString = append([]byte{}, bl1.hashString...)
+		bl2Hash = s.blockHash2[i]
+	}
+	rh := s.h1 + s.h2 + s.h3
+
+	if len(bl2.hashString) > ssdeepHalfSpamSumLen-1 {
+		bl2.hashString = bl2.hashString[:ssdeepHalfSpamSumLen-1]
+	}
+
+	if rh != 0 {
+		bl1.hashString = append(bl1.hashString, bl1Hash)
+		bl2.hashString = append(bl2.hashString, bl2Hash)
+	} else {
+		if bl1.hasTail1 {
+			bl1.hashString = append(bl1.hashString, bl1.tail1)
+		}
+		if bl2.hasTail2 {
+			bl2.hashString = append(bl2.hashString, bl2.tail2)
+		}
+	}
+	for j := range bl1.hashString {
+		bl1.hashString[j] = ssdeepB64String[bl1.hashString[j]]
+	}
+	for j := range bl2.hashString {
+		bl2.hashString[j] = ssdeepB64String[bl2.hashString[j]]
+	}
+
+	return fmt.Sprintf("%d:%s:%s", bl1.blockSize, bl1.hashString, bl2.hashString)
+}
 
 var (
 	// ErrSizeLimitReached indicates that the size limit was reached
@@ -104,7 +296,6 @@ type LRUCacheEntry struct {
 
 // SSDeepCacheKey is the key used for caching ssdeep hashes based on cheaper hashes
 type SSDeepCacheKey struct {
-	inode     uint64 // file inode
 	size      int64  // file size in bytes
 	cheapHash string // the cheapest hash used as cache key
 }
@@ -224,7 +415,7 @@ func (resolver *Resolver) getHashFunction(algorithm model.HashAlgorithm) hash.Ha
 	case model.MD5:
 		return md5.New()
 	case model.SSDEEP:
-		return ssdeep.New()
+		return newFastSSDeepHasher()
 	default:
 		return nil
 	}
@@ -514,7 +705,7 @@ func (resolver *Resolver) HashFileEvent(eventType model.EventType, cgroupID cont
 				cheapestHash = computedHashes[0]
 
 				// Check if we have a cached SSDEEP for this cheap hash
-				ssdeepKey := SSDeepCacheKey{cheapHash: cheapestHash, inode: file.Inode, size: size}
+				ssdeepKey := SSDeepCacheKey{cheapHash: cheapestHash, size: size}
 				if cached, ok := resolver.ssdeepCache.Get(ssdeepKey); ok {
 					ssdeepHashStr = cached.ssdeepHash
 					foundInCache = true
@@ -528,7 +719,7 @@ func (resolver *Resolver) HashFileEvent(eventType model.EventType, cgroupID cont
 				if _, err := f.Seek(0, 0); err != nil {
 					hashResolverTelemetry.hashMiss.Inc(eventType.String(), model.FileOpenError.String())
 				} else {
-					ssdeepHasher := ssdeep.New()
+					ssdeepHasher := newFastSSDeepHasher()
 					limitedWriter := newSizeLimitedWriter(ssdeepHasher, int(maxFileSize))
 
 					buffer := resolver.bufferPool.Get()
@@ -540,22 +731,16 @@ func (resolver *Resolver) HashFileEvent(eventType model.EventType, cgroupID cont
 							hashResolverTelemetry.hashMiss.Inc(eventType.String(), model.FileOpenError.String())
 						}
 					} else {
-						digest := ssdeepHasher.Sum(nil)
+						digest := ssdeepHasher.digest()
 						if len(digest) > 0 {
-							var hashStr strings.Builder
-							hashStr.WriteString("ssdeep:")
-							hashStr.Write(digest)
-							ssdeepHashStr = hashStr.String()
-
-							// Cache the SSDEEP hash with the cheapest hash as key
-							if cheapestHash != "" {
-								ssdeepKey := SSDeepCacheKey{cheapHash: cheapestHash, inode: file.Inode, size: size}
-								resolver.ssdeepCache.Add(ssdeepKey, &SSDeepCacheEntry{ssdeepHash: ssdeepHashStr})
-							}
-
+							ssdeepHashStr = "ssdeep:" + digest
 							hashResolverTelemetry.hashCount.Inc(eventType.String(), model.SSDEEP.String())
 						} else {
 							hashResolverTelemetry.hashMiss.Inc(eventType.String(), model.HashFailed.String())
+						}
+						if cheapestHash != "" {
+							ssdeepKey := SSDeepCacheKey{cheapHash: cheapestHash, size: size}
+							resolver.ssdeepCache.Add(ssdeepKey, &SSDeepCacheEntry{ssdeepHash: ssdeepHashStr})
 						}
 					}
 				}
@@ -564,6 +749,8 @@ func (resolver *Resolver) HashFileEvent(eventType model.EventType, cgroupID cont
 				if ssdeepHashStr != "" {
 					// Note: Already counted as cache hit, but also increment the hash count
 					hashResolverTelemetry.hashCount.Inc(eventType.String(), model.SSDEEP.String())
+				} else {
+					hashResolverTelemetry.hashMiss.Inc(eventType.String(), model.HashFailed.String())
 				}
 			}
 

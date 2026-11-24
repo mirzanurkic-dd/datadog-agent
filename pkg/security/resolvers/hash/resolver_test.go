@@ -9,11 +9,14 @@
 package hash
 
 import (
+	"bytes"
 	"math"
+	"math/rand"
 	"os"
 	"strings"
 	"testing"
 
+	"github.com/glaslos/ssdeep"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -384,7 +387,7 @@ func TestSSDeepCaching(t *testing.T) {
 
 	// Verify SSDEEP is cached with MD5 as key
 	if resolver.ssdeepCache != nil {
-		ssdeepKey := SSDeepCacheKey{cheapHash: md5Hash1, inode: file.Inode, size: int64(size)}
+		ssdeepKey := SSDeepCacheKey{cheapHash: md5Hash1, size: int64(size)}
 		cached, ok := resolver.ssdeepCache.Get(ssdeepKey)
 		assert.True(t, ok, "SSDEEP should be cached with MD5 as key")
 		assert.Equal(t, ssdeepHash1, cached.ssdeepHash, "cached SSDEEP should match")
@@ -448,7 +451,7 @@ func TestSSDeepCaching(t *testing.T) {
 
 	// Verify new SSDEEP is cached with new MD5
 	if resolver.ssdeepCache != nil {
-		ssdeepKey := SSDeepCacheKey{cheapHash: md5Hash3, inode: file.Inode, size: int64(size)}
+		ssdeepKey := SSDeepCacheKey{cheapHash: md5Hash3, size: int64(size)}
 		cached, ok := resolver.ssdeepCache.Get(ssdeepKey)
 		assert.True(t, ok, "new SSDEEP should be cached with new MD5 as key")
 		assert.Equal(t, ssdeepHash3, cached.ssdeepHash, "cached SSDEEP should match new hash")
@@ -559,6 +562,128 @@ func TestSSDeepSkipsSmallFile(t *testing.T) {
 	require.Equal(t, model.Done, file.HashState)
 	require.Len(t, hashes, 1)
 	assert.True(t, strings.HasPrefix(hashes[0], "md5:"))
+}
+
+func TestFastSSDeepHasherMatchesUpstream(t *testing.T) {
+	rng := rand.New(rand.NewSource(42))
+	cases := []struct {
+		name string
+		data []byte
+	}{
+		{
+			name: "patterned_8kb",
+			data: generateFileDataWithPattern(8192, 'a'),
+		},
+		{
+			name: "patterned_64kb",
+			data: generateFileDataWithPattern(65536, 'z'),
+		},
+		{
+			name: "random_10kb",
+			data: func() []byte {
+				b := make([]byte, 10240)
+				rng.Read(b)
+				return b
+			}(),
+		},
+		{
+			name: "random_256kb_with_runs",
+			data: func() []byte {
+				b := make([]byte, 256*1024)
+				rng.Read(b)
+				for i := 1000; i < len(b)-100; i += 4096 {
+					for j := 0; j < 32; j++ {
+						b[i+j] = 'X'
+					}
+				}
+				return b
+			}(),
+		},
+		{
+			name: "low_entropy_zeroes_8kb",
+			data: bytes.Repeat([]byte{0}, 8192),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream := ssdeep.New()
+			_, err := upstream.Write(tc.data)
+			require.NoError(t, err)
+			want := upstream.Sum(nil)
+
+			fast := newFastSSDeepHasher()
+			for off := 0; off < len(tc.data); off += 1337 {
+				end := min(off+1337, len(tc.data))
+				_, err := fast.Write(tc.data[off:end])
+				require.NoError(t, err)
+			}
+			got := fast.Sum(nil)
+			assert.Equal(t, string(want), string(got))
+		})
+	}
+}
+
+func TestSSDeepCrossInodeAndNegativeCache(t *testing.T) {
+	client := statsdclient.NewStatsdClient()
+	pid := uint32(os.Getpid())
+
+	tmpFile1, err := os.CreateTemp("", "ssdeep_cross_inode_1")
+	require.NoError(t, err)
+	defer os.Remove(tmpFile1.Name())
+
+	tmpFile2, err := os.CreateTemp("", "ssdeep_cross_inode_2")
+	require.NoError(t, err)
+	defer os.Remove(tmpFile2.Name())
+
+	payload := generateFileDataWithPattern(8192, 'k')
+	_, err = tmpFile1.Write(payload)
+	require.NoError(t, err)
+	require.NoError(t, tmpFile1.Close())
+
+	_, err = tmpFile2.Write(payload)
+	require.NoError(t, err)
+	require.NoError(t, tmpFile2.Close())
+
+	cfg := &config.RuntimeSecurityConfig{
+		HashResolverEnabled:        true,
+		HashResolverEventTypes:     []model.EventType{model.ExecEventType},
+		HashResolverHashAlgorithms: []model.HashAlgorithm{model.SHA256, model.SSDEEP},
+		HashResolverMaxHashRate:    math.MaxInt,
+		HashResolverMaxFileSize:    math.MaxInt64,
+		HashResolverCacheSize:      100,
+	}
+
+	resolver, err := NewResolver(cfg, client, nil)
+	require.NoError(t, err)
+
+	event := &model.Event{
+		BaseEvent: model.BaseEvent{
+			FieldHandlers: &model.FakeFieldHandlers{},
+			Type:          uint32(model.ExecEventType),
+			ProcessContext: &model.ProcessContext{
+				Process: model.Process{
+					PIDContext: model.PIDContext{Pid: pid},
+				},
+			},
+		},
+	}
+
+	file1 := &model.FileEvent{
+		PathnameStr:           tmpFile1.Name(),
+		IsPathnameStrResolved: true,
+	}
+	file1.Inode = 1001
+	file2 := &model.FileEvent{
+		PathnameStr:           tmpFile2.Name(),
+		IsPathnameStrResolved: true,
+	}
+	file2.Inode = 2002
+
+	hashes1 := resolver.ComputeHashesFromEvent(event, file1, 0)
+	hashes2 := resolver.ComputeHashesFromEvent(event, file2, 0)
+	assert.Equal(t, hashes1, hashes2)
+	assert.Equal(t, 1, resolver.ssdeepCache.Len())
 }
 
 func BenchmarkHashFunctions(b *testing.B) {
