@@ -11,8 +11,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/NVIDIA/go-nvml/pkg/nvml"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -20,6 +23,7 @@ import (
 	gpuconfig "github.com/DataDog/datadog-agent/pkg/gpu/config"
 	"github.com/DataDog/datadog-agent/pkg/gpu/prm"
 	ddnvml "github.com/DataDog/datadog-agent/pkg/gpu/safenvml"
+	nvmltestutil "github.com/DataDog/datadog-agent/pkg/gpu/safenvml/testutil"
 	gputestutil "github.com/DataDog/datadog-agent/pkg/gpu/testutil"
 	"github.com/DataDog/datadog-agent/pkg/system-probe/api/module"
 	"github.com/DataDog/datadog-agent/pkg/util/kernel"
@@ -108,4 +112,67 @@ func TestGetAgentPIDs(t *testing.T) {
 
 	assert.NoError(t, err)
 	assert.ElementsMatch(t, []uint32{1, 3}, pids)
+}
+
+func TestGPUModuleMigGrEndpoint(t *testing.T) {
+	nvmltestutil.SetupMockNVML(t,
+		gputestutil.WithDefaultMIGDevices(),
+		gputestutil.WithGpmSupport(true),
+		gputestutil.WithGpmMetricValues(map[nvml.GpmMetricId]gputestutil.MockGpmMetricValue{
+			nvml.GPM_METRIC_GRAPHICS_UTIL: {Value: 42, Return: nvml.SUCCESS},
+		}),
+	)
+	cache := ddnvml.NewDeviceCache()
+	migDevices, err := cache.AllMigDevices()
+	require.NoError(t, err)
+	require.NotEmpty(t, migDevices)
+	uuid := migDevices[0].GetDeviceInfo().UUID
+
+	newModule := func(enabled bool) (*GPUMonitoringModule, *http.ServeMux) {
+		router := http.NewServeMux()
+		gpuModule := &GPUMonitoringModule{
+			cfg:          &gpuconfig.Config{MigGrEndpointEnabled: enabled},
+			deviceCache:  cache,
+			migGrSamples: map[string]migGrSample{},
+		}
+		require.NoError(t, gpuModule.Register(module.NewRouter("gpu", router)))
+		return gpuModule, router
+	}
+	get := func(router *http.ServeMux, query string) *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/gpu/mig-gr"+query, nil))
+		return w
+	}
+	age := func(m *GPUMonitoringModule, d time.Duration) {
+		s := m.migGrSamples[uuid]
+		s.at = s.at.Add(-d)
+		m.migGrSamples[uuid] = s
+	}
+
+	_, disabled := newModule(false)
+	assert.Equal(t, http.StatusNotImplemented, get(disabled, "?uuid="+uuid).Code)
+
+	m, router := newModule(true)
+	assert.Equal(t, http.StatusBadRequest, get(router, "").Code)
+	assert.Equal(t, http.StatusNotFound, get(router, "?uuid=MIG-unknown").Code)
+
+	// The first request stores a baseline, a close second one keeps it
+	assert.Equal(t, http.StatusServiceUnavailable, get(router, "?uuid="+uuid).Code)
+	baseline := m.migGrSamples[uuid]
+	assert.Equal(t, http.StatusServiceUnavailable, get(router, "?uuid="+uuid).Code)
+	assert.Equal(t, baseline, m.migGrSamples[uuid])
+
+	// A request one check interval later returns the value
+	age(m, 15*time.Second)
+	w := get(router, "?uuid="+uuid)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	assert.Equal(t, "42", strings.TrimSpace(w.Body.String()))
+
+	// A baseline older than migGrMaxAge is replaced instead of averaging over the gap
+	age(m, migGrMaxAge+time.Minute)
+	assert.Equal(t, http.StatusServiceUnavailable, get(router, "?uuid="+uuid).Code)
+
+	// An NVML release drops the stored samples
+	m.dropMigGrSamples(true)
+	assert.Empty(t, m.migGrSamples)
 }
