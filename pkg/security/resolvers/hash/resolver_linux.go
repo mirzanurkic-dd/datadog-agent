@@ -232,7 +232,8 @@ func (s *fastSSDeepHasher) digest() string {
 	}
 
 	i := s.iStart
-	for ; uint64(uint32(ssdeepBlockMin)<<i)*ssdeepSpamSumLength < s.totalSize; i++ {
+	for uint64(uint32(ssdeepBlockMin)<<i)*ssdeepSpamSumLength < s.totalSize {
+		i++
 	}
 
 	if i >= s.iEnd {

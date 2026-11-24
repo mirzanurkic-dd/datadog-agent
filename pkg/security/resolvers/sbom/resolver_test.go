@@ -3270,4 +3270,3 @@ func TestLookupDoesNotBlockWhileSBOMScanning(t *testing.T) {
 		t.Fatal("LookupPackage or HostPackageVersion blocked on SBOM write lock while state was pending")
 	}
 }
-

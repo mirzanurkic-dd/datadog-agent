@@ -2498,4 +2498,3 @@ func TestArrayVariableCachedKeysInvalidation(t *testing.T) {
 	assert.False(t, ok)
 	assert.Empty(t, intVals)
 }
-
