@@ -36,6 +36,7 @@ func (server *apiServer) startIPCServer(ipcServerAddr string, tmf observability.
 	ipcMuxHandler := tmf.Middleware(ipcServerShortName)(ipcMux)
 	ipcMuxHandler = observability.LogResponseHandler(ipcServerName)(ipcMuxHandler)
 
+	// mTLS enforced unconditionally, not subject to the rollback setting
 	serverTLSConfig := server.ipc.GetTLSServerConfig()
 	serverTLSConfig.ClientAuth = tls.RequireAndVerifyClientCert
 
