@@ -1433,6 +1433,13 @@ func (r *Resolver) ResolvePackage(pc *model.ProcessContext, file *model.FileEven
 		return nil
 	}
 
+	if !sbom.IsComputed() {
+		r.queuePendingFileEvent(pc.ContainerContext.ContainerID, lookupPath, file.Mode, runsAsRoot(pc), file.MountID)
+		if !sbom.IsComputed() {
+			return nil
+		}
+	}
+
 	sbom.Lock()
 
 	// If the SBOM scan hasn't completed yet, queue this access so it is replayed once
@@ -1790,7 +1797,7 @@ func (r *Resolver) queueWorkload(sbom *SBOM) {
 	}
 
 	// check if this sbom has been scanned before
-	if r.acquireData(sbom, r.rootFingerprint(sbom)) {
+	if r.dataCache != nil && r.dataCache.hasWorkload(sbom.workloadKey) && r.acquireData(sbom, r.rootFingerprint(sbom)) {
 		sbom.state.Store(computedState)
 
 		r.sbomsCacheHit.Inc()
