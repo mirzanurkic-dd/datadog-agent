@@ -518,6 +518,51 @@ func TestCrossCgroupCacheHit(t *testing.T) {
 	assert.Equal(t, hashes1, hashes2)
 }
 
+func TestHashRateLimiterRejectsWhenExceeded(t *testing.T) {
+	client := statsdclient.NewStatsdClient()
+	pid := uint32(os.Getpid())
+
+	tmpDir := t.TempDir()
+	f1Path := tmpDir + "/file1"
+	f2Path := tmpDir + "/file2"
+	require.NoError(t, os.WriteFile(f1Path, []byte("file1"), 0o600))
+	require.NoError(t, os.WriteFile(f2Path, []byte("file2"), 0o600))
+
+	cfg := &config.RuntimeSecurityConfig{
+		HashResolverEnabled:        true,
+		HashResolverEventTypes:     []model.EventType{model.ExecEventType},
+		HashResolverHashAlgorithms: []model.HashAlgorithm{model.MD5},
+		HashResolverMaxHashRate:    1,
+		HashResolverMaxFileSize:    1 << 10,
+		HashResolverCacheSize:      100,
+	}
+
+	resolver, err := NewResolver(cfg, client, nil)
+	require.NoError(t, err)
+
+	ev := &model.Event{
+		BaseEvent: model.BaseEvent{
+			FieldHandlers: &model.FakeFieldHandlers{},
+			Type:          uint32(model.ExecEventType),
+			ProcessContext: &model.ProcessContext{
+				Process: model.Process{
+					PIDContext: model.PIDContext{Pid: pid},
+				},
+			},
+		},
+	}
+
+	file1 := &model.FileEvent{PathnameStr: f1Path, IsPathnameStrResolved: true}
+	hashes1 := resolver.ComputeHashesFromEvent(ev, file1, 0)
+	require.Equal(t, model.Done, file1.HashState)
+	require.Len(t, hashes1, 1)
+
+	file2 := &model.FileEvent{PathnameStr: f2Path, IsPathnameStrResolved: true}
+	hashes2 := resolver.ComputeHashesFromEvent(ev, file2, 0)
+	require.Equal(t, model.HashWasRateLimited, file2.HashState)
+	require.Empty(t, hashes2)
+}
+
 func TestSSDeepSkipsSmallFile(t *testing.T) {
 	client := statsdclient.NewStatsdClient()
 	pid := uint32(os.Getpid())

@@ -634,7 +634,7 @@ func (dr *Resolver) Resolve(pathKey model.PathKey, cache bool, caller Caller) (s
 	if err != nil && !errors.As(err, &truncatedERPC) && dr.config.MapDentryResolutionEnabled {
 		path, err = dr.ResolveFromMap(pathKey, cache, caller)
 		if err != nil && erpcErr != nil {
-			err = fmt.Errorf("%w (erpc: %w)", err, erpcErr)
+			err = &errDentryWithERPC{mapErr: err, erpcErr: erpcErr}
 		}
 	}
 	return path, err

@@ -10,6 +10,7 @@ import (
 	"crypto/md5"
 	"crypto/sha1"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -66,9 +67,38 @@ type fastSSDeepHasher struct {
 	iStart, iEnd int
 	totalSize    uint64
 	bsizeMask    uint32
-	blockHash1   [ssdeepNumBlockhashes]byte
-	blockHash2   [ssdeepNumBlockhashes]byte
+	blockHash1   [ssdeepNumBlockhashes + 16]byte
+	blockHash2   [ssdeepNumBlockhashes + 16]byte
 	blocks       [ssdeepNumBlockhashes]fastSSDeepBlock
+}
+
+func stepSWAR8(w, b8 uint64) uint64 {
+	return (((w * 3) + ((w & 0x0303030303030303) << 4)) & 0x3f3f3f3f3f3f3f3f) ^ b8
+}
+
+func (s *fastSSDeepHasher) loadSWAR() (w1Lo, w2Lo, w1Hi, w2Hi uint64) {
+	iStart := s.iStart
+	w1Lo = binary.LittleEndian.Uint64(s.blockHash1[iStart : iStart+8])
+	w2Lo = binary.LittleEndian.Uint64(s.blockHash2[iStart : iStart+8])
+	if s.iEnd-iStart > 8 {
+		w1Hi = binary.LittleEndian.Uint64(s.blockHash1[iStart+8 : iStart+16])
+		w2Hi = binary.LittleEndian.Uint64(s.blockHash2[iStart+8 : iStart+16])
+	}
+	return w1Lo, w2Lo, w1Hi, w2Hi
+}
+
+func (s *fastSSDeepHasher) storeSWAR(w1Lo, w2Lo, w1Hi, w2Hi uint64) {
+	span := s.iEnd - s.iStart
+	var tmp1, tmp2 [16]byte
+	binary.LittleEndian.PutUint64(tmp1[:8], w1Lo)
+	binary.LittleEndian.PutUint64(tmp2[:8], w2Lo)
+	if span > 8 {
+		binary.LittleEndian.PutUint64(tmp1[8:16], w1Hi)
+		binary.LittleEndian.PutUint64(tmp2[8:16], w2Hi)
+	}
+	n := min(span, 16)
+	copy(s.blockHash1[s.iStart:s.iStart+n], tmp1[:n])
+	copy(s.blockHash2[s.iStart:s.iStart+n], tmp2[:n])
 }
 
 func newFastSSDeepHasher() *fastSSDeepHasher {
@@ -103,14 +133,23 @@ func (s *fastSSDeepHasher) Write(p []byte) (int, error) {
 	h1, h2, h3, n := s.h1, s.h2, s.h3, s.n
 	window := s.window
 	iStart, iEnd := s.iStart, s.iEnd
+	span := iEnd - iStart
 	bsizeMask := s.bsizeMask
 	bh1 := &s.blockHash1
 	bh2 := &s.blockHash2
+	w1Lo, w2Lo, w1Hi, w2Hi := s.loadSWAR()
 
 	for _, b := range p {
-		for i := iStart; i < iEnd; i++ {
-			bh1[i] = ((bh1[i] * ssdeepHashPrime) ^ b) & 63
-			bh2[i] = ((bh2[i] * ssdeepHashPrime) ^ b) & 63
+		b8 := uint64(b&63) * 0x0101010101010101
+		w1Lo = stepSWAR8(w1Lo, b8)
+		w2Lo = stepSWAR8(w2Lo, b8)
+		if span > 8 {
+			w1Hi = stepSWAR8(w1Hi, b8)
+			w2Hi = stepSWAR8(w2Hi, b8)
+			for i := iStart + 16; i < iEnd; i++ {
+				bh1[i] = ((bh1[i] * ssdeepHashPrime) ^ b) & 63
+				bh2[i] = ((bh2[i] * ssdeepHashPrime) ^ b) & 63
+			}
 		}
 
 		bc := uint32(b)
@@ -126,13 +165,17 @@ func (s *fastSSDeepHasher) Write(p []byte) (int, error) {
 		h3 = (h3 << 5) ^ bc
 
 		rh := h1 + h2 + h3
-		if rh == math.MaxUint32 || ((rh+1)/ssdeepBlockMin)&bsizeMask > 0 || (rh+1)%ssdeepBlockMin > 0 {
+		if (rh+1)&bsizeMask != 0 || (rh+1)%ssdeepBlockMin != 0 || rh == math.MaxUint32 {
 			continue
 		}
+		s.storeSWAR(w1Lo, w2Lo, w1Hi, w2Hi)
 		s.triggerBoundary(rh)
 		iStart, iEnd, bsizeMask = s.iStart, s.iEnd, s.bsizeMask
+		span = iEnd - iStart
+		w1Lo, w2Lo, w1Hi, w2Hi = s.loadSWAR()
 	}
 
+	s.storeSWAR(w1Lo, w2Lo, w1Hi, w2Hi)
 	s.h1, s.h2, s.h3, s.n = h1, h2, h3, n
 	s.window = window
 	return len(p), nil
@@ -350,11 +393,7 @@ func NewResolver(c *config.RuntimeSecurityConfig, statsdClient statsd.ClientInte
 		}
 	}
 
-	burst := 1
-	// if the rate limiter is disabled, set the burst to 0
-	if c.HashResolverMaxHashRate == 0 {
-		burst = 0
-	}
+	burst := max(c.HashResolverMaxHashRate, 0)
 
 	// size of the buffer used to copy data from the file to the hash functions
 	const copyBufferSize = 32 * 1024
@@ -508,15 +547,6 @@ func (resolver *Resolver) HashFileEvent(eventType model.EventType, cgroupID cont
 		maxFileSize = resolver.opts.MaxFileSize
 	}
 
-	// check the rate limiter
-	rateReservation := resolver.limiter.Reserve()
-	if !rateReservation.OK() {
-		// better luck next time
-		hashResolverTelemetry.hashMiss.Inc(eventType.String(), model.HashWasRateLimited.String())
-		file.HashState = model.HashWasRateLimited
-		return
-	}
-
 	// add pid one for hash resolution outside of a container
 	rootPIDs := []uint32{1, pid}
 	if resolver.cgroupResolver != nil {
@@ -527,15 +557,16 @@ func (resolver *Resolver) HashFileEvent(eventType model.EventType, cgroupID cont
 
 	// open the target file
 	var (
-		lastErr     error
-		f           *os.File
-		mode        fs.FileMode
-		size        int64
-		mtime       uint64
-		fkey        fileUniqKey
-		entryInode  uint64
-		fileKey     LRUCacheKey
-		failedCache = make(map[fileUniqKey]struct{})
+		lastErr         error
+		f               *os.File
+		mode            fs.FileMode
+		size            int64
+		mtime           uint64
+		fkey            fileUniqKey
+		entryInode      uint64
+		fileKey         LRUCacheKey
+		rateReservation *rate.Reservation
+		failedCache     = make(map[fileUniqKey]struct{})
 	)
 	for _, pidCandidate := range rootPIDs {
 		path := utils.ProcRootFilePath(pidCandidate, file.PathnameStr)
@@ -550,14 +581,18 @@ func (resolver *Resolver) HashFileEvent(eventType model.EventType, cgroupID cont
 		}
 
 		if size > maxFileSize {
-			rateReservation.Cancel()
+			if rateReservation != nil {
+				rateReservation.Cancel()
+			}
 			hashResolverTelemetry.hashMiss.Inc(eventType.String(), model.FileTooBig.String())
 			file.HashState = model.FileTooBig
 			return
 		}
 
 		if size == 0 {
-			rateReservation.Cancel()
+			if rateReservation != nil {
+				rateReservation.Cancel()
+			}
 			hashResolverTelemetry.hashMiss.Inc(eventType.String(), model.FileEmpty.String())
 			file.HashState = model.FileEmpty
 			return
@@ -580,9 +615,21 @@ func (resolver *Resolver) HashFileEvent(eventType model.EventType, cgroupID cont
 					file.HashState = cacheEntry.state
 					file.Hashes = cacheEntry.hashes
 					hashResolverTelemetry.hashCacheHit.Inc(eventType.String())
-					rateReservation.Cancel()
+					if rateReservation != nil {
+						rateReservation.Cancel()
+					}
 					return
 				}
+			}
+		}
+
+		if rateReservation == nil {
+			rateReservation = resolver.limiter.Reserve()
+			if !rateReservation.OK() || rateReservation.Delay() > 0 {
+				rateReservation.Cancel()
+				hashResolverTelemetry.hashMiss.Inc(eventType.String(), model.HashWasRateLimited.String())
+				file.HashState = model.HashWasRateLimited
+				return
 			}
 		}
 
@@ -601,7 +648,9 @@ func (resolver *Resolver) HashFileEvent(eventType model.EventType, cgroupID cont
 		break
 	}
 	if lastErr != nil {
-		rateReservation.Cancel()
+		if rateReservation != nil {
+			rateReservation.Cancel()
+		}
 		if os.IsNotExist(lastErr) {
 			file.HashState = model.FileNotFound
 			hashResolverTelemetry.hashMiss.Inc(eventType.String(), model.FileNotFound.String())
@@ -618,7 +667,9 @@ func (resolver *Resolver) HashFileEvent(eventType model.EventType, cgroupID cont
 	}
 
 	if f == nil {
-		rateReservation.Cancel()
+		if rateReservation != nil {
+			rateReservation.Cancel()
+		}
 		file.HashState = model.FileNotFound
 		hashResolverTelemetry.hashMiss.Inc(eventType.String(), model.FileNotFound.String())
 		return

@@ -34,9 +34,10 @@ import (
 
 const (
 	// mounts LRU limit: 100000 mounts
-	mountsLimit       = 100000
-	danglingListLimit = 2000
-	pidNsLimit        = 100000
+	mountsLimit             = 100000
+	danglingListLimit       = 2000
+	pidNsLimit              = 100000
+	unresolvableMountsLimit = 2048
 	// maxMountPathDepth is the maximum depth of a mount path resolution chain
 	maxMountPathDepth = 128
 )
@@ -49,14 +50,15 @@ type ResolverOpts struct {
 
 // Resolver represents a cache for mountpoints and the corresponding file systems
 type Resolver struct {
-	opts           ResolverOpts
-	dentryResolver *dentry.Resolver
-	statsdClient   statsd.ClientInterface
-	lock           sync.RWMutex
-	mounts         *simplelru.LRU[uint32, *model.Mount]
-	minMountID     uint32 // used to find the first userspace visible mount ID
-	dangling       *simplelru.LRU[uint32, *model.Mount]
-	pidNs          *simplelru.LRU[uint32, uint32]
+	opts               ResolverOpts
+	dentryResolver     *dentry.Resolver
+	statsdClient       statsd.ClientInterface
+	lock               sync.RWMutex
+	mounts             *simplelru.LRU[uint32, *model.Mount]
+	minMountID         uint32 // used to find the first userspace visible mount ID
+	dangling           *simplelru.LRU[uint32, *model.Mount]
+	pidNs              *simplelru.LRU[uint32, uint32]
+	unresolvableMounts *simplelru.LRU[uint64, struct{}]
 
 	// stats
 	cacheHitsStats atomic.Int64
@@ -72,7 +74,7 @@ func (mr *Resolver) IsMountIDValid(mountID uint32) (bool, error) {
 	}
 
 	if mountID < mr.minMountID {
-		return false, fmt.Errorf("%w (mount_id=%d < min_mount_id=%d)", ErrMountKernelID, mountID, mr.minMountID)
+		return false, ErrMountKernelID
 	}
 
 	return true, nil
@@ -184,6 +186,7 @@ func (mr *Resolver) syncPidNamespace(pid uint32) error {
 	// Use Peek to avoid mutating the LRU ordering during iteration.
 	ns, ok := mr.pidNs.Peek(pid)
 	if ok {
+		tried := 0
 		for k := range mr.pidNs.KeysIter() {
 			if k == pid {
 				continue
@@ -196,6 +199,10 @@ func (mr *Resolver) syncPidNamespace(pid uint32) error {
 			err = syncPid(k)
 			if err == nil {
 				return nil
+			}
+			tried++
+			if tried >= maxFallbackSyncPids {
+				break
 			}
 		}
 	}
@@ -614,7 +621,14 @@ func (mr *Resolver) resolveMountPath(mountID uint32, pid uint32) (string, model.
 		return "", model.MountSourceUnknown, model.MountOriginUnknown, cacheErr
 	}
 
+	unresolvableKey := (uint64(mountID) << 32) | uint64(pid)
+	if mr.unresolvableMounts.Contains(unresolvableKey) {
+		mr.procMissStats.Inc()
+		return "", model.MountSourceUnknown, model.MountOriginUnknown, cacheErr
+	}
+
 	if syncErr := mr.syncPidNamespace(pid); syncErr != nil {
+		mr.unresolvableMounts.Add(unresolvableKey, struct{}{})
 		return "", model.MountSourceUnknown, model.MountOriginUnknown, fmt.Errorf("cache lookup failed (%w) and procfs sync failed: %w", cacheErr, syncErr)
 	}
 
@@ -624,6 +638,7 @@ func (mr *Resolver) resolveMountPath(mountID uint32, pid uint32) (string, model.
 		return path, source, origin, nil
 	}
 	mr.procMissStats.Inc()
+	mr.unresolvableMounts.Add(unresolvableKey, struct{}{})
 
 	return "", model.MountSourceUnknown, model.MountOriginUnknown, fmt.Errorf("after procfs sync (pid=%d, initial_cache_err=%v): %w", pid, cacheErr, err)
 }
@@ -648,7 +663,18 @@ func (mr *Resolver) resolveMount(mountID uint32, pid uint32) (*model.Mount, mode
 	}
 	mr.cacheMissStats.Inc()
 
+	if !mr.opts.UseProcFS && !mr.opts.SnapshotUsingListMount {
+		return nil, model.MountSourceUnknown, model.MountOriginUnknown, &ErrMountNotFound{MountID: mountID}
+	}
+
+	unresolvableKey := (uint64(mountID) << 32) | uint64(pid)
+	if mr.unresolvableMounts.Contains(unresolvableKey) {
+		mr.procMissStats.Inc()
+		return nil, model.MountSourceUnknown, model.MountOriginUnknown, &ErrMountNotFound{MountID: mountID}
+	}
+
 	if err := mr.syncPidNamespace(pid); err != nil {
+		mr.unresolvableMounts.Add(unresolvableKey, struct{}{})
 		return nil, model.MountSourceUnknown, model.MountOriginUnknown, fmt.Errorf("mount %d not in cache and procfs sync failed: %w", mountID, err)
 	}
 
@@ -657,6 +683,7 @@ func (mr *Resolver) resolveMount(mountID uint32, pid uint32) (*model.Mount, mode
 		return mount, model.MountSourceMountID, mount.Origin, nil
 	}
 	mr.procMissStats.Inc()
+	mr.unresolvableMounts.Add(unresolvableKey, struct{}{})
 
 	return nil, model.MountSourceUnknown, model.MountOriginUnknown, fmt.Errorf("after procfs sync (pid=%d): %w", pid, &ErrMountNotFound{MountID: mountID})
 }
@@ -773,14 +800,20 @@ func NewResolver(statsdClient statsd.ClientInterface, dentryResolver *dentry.Res
 		return nil, err
 	}
 
+	unresolvableMounts, err := simplelru.NewLRU[uint64, struct{}](unresolvableMountsLimit, nil)
+	if err != nil {
+		return nil, err
+	}
+
 	mr := &Resolver{
-		opts:           opts,
-		statsdClient:   statsdClient,
-		lock:           sync.RWMutex{},
-		mounts:         mounts,
-		dentryResolver: dentryResolver,
-		dangling:       dangling,
-		pidNs:          pidNs,
+		opts:               opts,
+		statsdClient:       statsdClient,
+		lock:               sync.RWMutex{},
+		mounts:             mounts,
+		dentryResolver:     dentryResolver,
+		dangling:           dangling,
+		pidNs:              pidNs,
+		unresolvableMounts: unresolvableMounts,
 	}
 
 	if mr.opts.SnapshotUsingListMount && !HasListMount() {
