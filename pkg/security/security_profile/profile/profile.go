@@ -20,6 +20,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unsafe"
 
 	"github.com/DataDog/datadog-go/v5/statsd"
 	"go.uber.org/atomic"
@@ -49,12 +50,42 @@ type VersionContext struct {
 
 	// Tags defines the tags used to compute this profile, for each present profile versions
 	Tags []string
+
+	tagSet        map[string]struct{}
+	lastTagsPtr   *string
+	lastTagsLen   int
+	lastTotalTags int
 }
 
 // AddTags adds to the version context the tags it doesn't hold yet. Two values of the
 // same tag name are both kept, so that each workload running this version contributes its tags.
 func (ctx *VersionContext) AddTags(tags []string) {
-	ctx.Tags = appendMissingTags(ctx.Tags, tags)
+	if len(tags) == 0 {
+		return
+	}
+	if len(tags) == ctx.lastTagsLen && unsafe.SliceData(tags) == ctx.lastTagsPtr && len(ctx.Tags) == ctx.lastTotalTags {
+		return
+	}
+	if ctx.tagSet == nil || len(ctx.tagSet) != len(ctx.Tags) {
+		ctx.tagSet = make(map[string]struct{}, len(ctx.Tags)+len(tags))
+		for _, t := range ctx.Tags {
+			if t != "" {
+				ctx.tagSet[t] = struct{}{}
+			}
+		}
+	}
+	for _, tag := range tags {
+		if tag == "" {
+			continue
+		}
+		if _, ok := ctx.tagSet[tag]; !ok {
+			ctx.tagSet[tag] = struct{}{}
+			ctx.Tags = append(ctx.Tags, tag)
+		}
+	}
+	ctx.lastTagsPtr = unsafe.SliceData(tags)
+	ctx.lastTagsLen = len(tags)
+	ctx.lastTotalTags = len(ctx.Tags)
 }
 
 func appendMissingTags(dst []string, tags []string) []string {

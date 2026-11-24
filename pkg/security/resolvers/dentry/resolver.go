@@ -504,22 +504,25 @@ func (dr *Resolver) cacheEntries(keys []model.PathKey, names [][]byte) error {
 	return nil
 }
 
-func (dr *Resolver) computeSegmentCount() int {
+func (dr *Resolver) computeSegmentCount(challenge uint32) int {
 	count := 0
 	i := 0
-	for i < dr.erpcSegmentSize {
+	for i < dr.erpcSegmentSize-17 {
+		if challenge != binary.NativeEndian.Uint32(dr.erpcSegment[i+12:i+16]) {
+			break
+		}
 		i += 16 // skip the path key
 
-		if i < dr.erpcSegmentSize {
-			if dr.erpcSegment[i] == '/' {
-				break
-			}
-
-			// skip the segment
-			i += bytes.IndexByte(dr.erpcSegment[i:], 0)
+		if dr.erpcSegment[i] == 0 || dr.erpcSegment[i] == '/' {
+			break
 		}
 
-		i++ // skip the null terminator
+		// skip the segment
+		nul := bytes.IndexByte(dr.erpcSegment[i:], 0)
+		if nul < 0 {
+			break
+		}
+		i += nul + 1 // skip the null terminator
 		count++
 	}
 	return count
@@ -545,7 +548,7 @@ func (dr *Resolver) ResolveFromERPC(pathKey model.PathKey, cache bool, caller Ca
 		return "", fmt.Errorf("unable to resolve the path of mountID `%d` and inode `%d` with eRPC: %w", pathKey.MountID, pathKey.Inode, err)
 	}
 
-	segmentCount := dr.computeSegmentCount()
+	segmentCount := dr.computeSegmentCount(challenge)
 	dr.prepareBuffersWithCapacity(segmentCount)
 
 	i := 0

@@ -22,7 +22,6 @@ import (
 	"github.com/DataDog/datadog-agent/pkg/security/secl/model/sharedconsts"
 	"github.com/DataDog/datadog-agent/pkg/security/secl/rules"
 	"github.com/DataDog/datadog-agent/pkg/security/utils"
-	"github.com/DataDog/datadog-agent/pkg/util/scrubber"
 )
 
 // ContainerContextSerializer serializes a container context to JSON
@@ -499,11 +498,11 @@ func NewBaseEventSerializer(event *model.Event, rule *rules.Rule, scrubber *util
 	s := &BaseEventSerializer{
 		EventContextSerializer: EventContextSerializer{
 			Name:        eventType.String(),
-			Variables:   newVariablesContext(event, rule, ""),
+			Variables:   newVariablesContext(event, rule, "", scrubber),
 			RuleContext: newRuleContext(event, rule, scrubber),
 			Source:      event.Source,
 		},
-		ProcessContextSerializer: newProcessContextSerializer(pc, event, rule),
+		ProcessContextSerializer: newProcessContextSerializer(pc, event, rule, scrubber),
 		Date:                     utils.NewEasyjsonTime(event.ResolveEventTime()),
 	}
 
@@ -562,7 +561,7 @@ func newRuleContext(e *model.Event, rule *rules.Rule, scrubber *utils.Scrubber) 
 	return ruleContext
 }
 
-func newVariablesContext(e *model.Event, rule *rules.Rule, prefix string) (variables Variables) {
+func newVariablesContext(e *model.Event, rule *rules.Rule, prefix string, scrubber *utils.Scrubber) (variables Variables) {
 	if rule != nil && rule.Opts != nil && rule.Opts.VariableStore != nil {
 		store := rule.Opts.VariableStore
 		var ctx *eval.Context
@@ -605,16 +604,14 @@ func newVariablesContext(e *model.Event, rule *rules.Rule, prefix string) (varia
 								scrubbedValues = append(scrubbedValues, "")
 								continue
 							}
-							if scrubbed, err := scrubber.ScrubString(elem); err == nil {
-								scrubbedValues = append(scrubbedValues, scrubbed)
-							}
+							scrubbedValues = append(scrubbedValues, scrubber.ScrubLine(elem))
 						}
 						variables[trimmedName] = scrubbedValues
 					case string:
 						if value == "" {
 							variables[trimmedName] = ""
-						} else if scrubbed, err := scrubber.ScrubString(value); err == nil {
-							variables[trimmedName] = scrubbed
+						} else {
+							variables[trimmedName] = scrubber.ScrubLine(value)
 						}
 					default:
 						variables[trimmedName] = value

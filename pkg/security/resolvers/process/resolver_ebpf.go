@@ -134,8 +134,9 @@ type EBPFResolver struct {
 	inodeErrStats                map[string]*atomic.Int64     // inode error stats by tag
 	spanCtxStats                 map[spanCtxKey]*atomic.Int64 // span context stats by (step, status)
 
-	entryCache    map[uint32]*model.ProcessCacheEntry
-	argsEnvsCache *simplelru.LRU[uint64, *argsEnvsCacheEntry]
+	entryCache             map[uint32]*model.ProcessCacheEntry
+	argsEnvsCache          *simplelru.LRU[uint64, *argsEnvsCacheEntry]
+	unresolvableProcfsPids *simplelru.LRU[uint32, struct{}]
 
 	// limiters
 	procFallbackLimiter *utils.Limiter[uint32]
@@ -223,10 +224,17 @@ func (p *EBPFResolver) reparentTo(entry *model.ProcessCacheEntry, newPPid uint32
 
 	newParent := p.entryCache[newPPid]
 	if newParent == nil {
+		if p.unresolvableProcfsPids != nil && p.unresolvableProcfsPids.Contains(newPPid) {
+			p.reparentFailedStats[callpathTag].Inc()
+			return nil
+		}
 		newParent = p.resolveFromProcfs(newPPid, 0, procResolveMaxDepth, newEntryCb)
 		if newParent != nil {
 			p.reparentProcfsResolutionOk.Inc()
 		} else {
+			if p.unresolvableProcfsPids != nil {
+				p.unresolvableProcfsPids.Add(newPPid, struct{}{})
+			}
 			p.reparentProcfsResolutionFail.Inc()
 		}
 	}
@@ -378,13 +386,22 @@ func (p *EBPFResolver) TryReparentFromKernelPPid(entry *model.ProcessCacheEntry,
 func (p *EBPFResolver) tryResolveMissingAncestor(pc *model.ProcessCacheEntry, callpathTag string, newEntryCb func(*model.ProcessCacheEntry, error)) *model.ProcessCacheEntry {
 	ppid := pc.PPid
 	if ppid == 0 {
+		if p.unresolvableProcfsPids != nil && p.unresolvableProcfsPids.Contains(pc.Pid) {
+			return nil
+		}
 		proc, err := process.NewProcess(int32(pc.Pid))
 		if err != nil {
+			if p.unresolvableProcfsPids != nil {
+				p.unresolvableProcfsPids.Add(pc.Pid, struct{}{})
+			}
 			p.reparentFailedStats[callpathTag].Inc()
 			return nil
 		}
 		newPPid, err := proc.Ppid()
 		if err != nil || newPPid <= 0 {
+			if p.unresolvableProcfsPids != nil {
+				p.unresolvableProcfsPids.Add(pc.Pid, struct{}{})
+			}
 			p.reparentFailedStats[callpathTag].Inc()
 			return nil
 		}
@@ -857,10 +874,28 @@ func (p *EBPFResolver) enrichEventFromProcfs(entry *model.ProcessCacheEntry, pro
 
 	if p.config.NetworkEnabled {
 		// snapshot pid routes in kernel space
-		_, _ = proc.OpenFiles()
+		snapshotProcRoutes(pid)
 	}
 
 	return nil
+}
+
+func snapshotProcRoutes(pid uint32) {
+	fdDir := kernel.HostProc(strconv.Itoa(int(pid)), "fd")
+	d, err := os.Open(fdDir)
+	if err != nil {
+		return
+	}
+	defer d.Close()
+
+	names, err := d.Readdirnames(256)
+	if err != nil && len(names) == 0 {
+		return
+	}
+	prefix := fdDir + "/"
+	for _, name := range names {
+		_, _ = os.Readlink(prefix + name)
+	}
 }
 
 func (p *EBPFResolver) statFile(filename string) (uint64, []byte, error) {
@@ -936,6 +971,9 @@ func (p *EBPFResolver) insertEntry(entry *model.ProcessCacheEntry, cgroupContext
 	entry.Source = source
 
 	p.entryCache[entry.Pid] = entry
+	if p.unresolvableProcfsPids != nil {
+		p.unresolvableProcfsPids.Remove(entry.Pid)
+	}
 
 	// resolve missing PPid from procfs
 	if entry.PPid == 0 && entry.Pid != 1 {
@@ -1324,8 +1362,8 @@ func (p *EBPFResolver) resolveFromProcfs(pid uint32, inode uint64, maxDepth int,
 		return nil
 	}
 
-	if pid == 0 {
-		seclog.Tracef("no pid: %d", pid)
+	if pid == 0 || IsKworker(0, pid) {
+		seclog.Tracef("no pid or kworker: %d", pid)
 		return nil
 	}
 
@@ -2230,6 +2268,11 @@ func NewEBPFResolver(manager *manager.Manager, config *config.Config, statsdClie
 		return nil, err
 	}
 
+	unresolvableProcfsPids, err := simplelru.NewLRU[uint32, struct{}](2048, nil)
+	if err != nil {
+		return nil, err
+	}
+
 	p := &EBPFResolver{
 		manager:                      manager,
 		config:                       config,
@@ -2238,6 +2281,7 @@ func NewEBPFResolver(manager *manager.Manager, config *config.Config, statsdClie
 		entryCache:                   make(map[uint32]*model.ProcessCacheEntry),
 		opts:                         *opts,
 		argsEnvsCache:                argsEnvsCache,
+		unresolvableProcfsPids:       unresolvableProcfsPids,
 		state:                        atomic.NewInt64(Snapshotting),
 		hitsStats:                    map[string]*atomic.Int64{},
 		missStats:                    atomic.NewInt64(0),

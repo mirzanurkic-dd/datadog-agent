@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"unsafe"
 
 	"github.com/spf13/cast"
 
@@ -110,8 +111,29 @@ type RuleSet struct {
 	logger log.Logger
 	pool   *eval.ContextPool
 
+	discarderPlansLock sync.RWMutex
+	discarderPlans     map[discarderPlanKey]*discarderPlan
+
 	// event collector, used for tests
 	eventCollector EventCollector
+}
+
+type discarderPlanKey struct {
+	rulesPtr **Rule
+	rulesLen int
+	key      string
+}
+
+type discarderRuleEval struct {
+	rule *Rule
+	eval eval.BoolEvalFnc
+}
+
+type discarderPlan struct {
+	blockedRule *Rule
+	blockedErr  error
+	hasRules    bool
+	evals       []discarderRuleEval
 }
 
 // ListRuleIDs returns the list of RuleIDs from the ruleset
@@ -643,10 +665,16 @@ func GetRuleEventType(rule *eval.Rule) (eval.EventType, error) {
 // WithExcludedRuleFromDiscarders set excluded rule from discarders
 func (rs *RuleSet) WithExcludedRuleFromDiscarders(excludedRuleFromDiscarders map[eval.RuleID]bool) {
 	rs.opts.ExcludedRuleFromDiscarders = excludedRuleFromDiscarders
+	rs.discarderPlansLock.Lock()
+	clear(rs.discarderPlans)
+	rs.discarderPlansLock.Unlock()
 }
 
 // AddRule creates the rule evaluator and adds it to the bucket of its events
 func (rs *RuleSet) AddRule(pRule *PolicyRule) (model.EventCategory, error) {
+	rs.discarderPlansLock.Lock()
+	clear(rs.discarderPlans)
+	rs.discarderPlansLock.Unlock()
 	if pRule.Def.Disabled {
 		return model.UnknownCategory, nil
 	}
@@ -979,25 +1007,78 @@ func (rs *RuleSet) GetFieldValues(field eval.Field) []eval.FieldValue {
 	return values
 }
 
-// IsDiscarder partially evaluates an Event against a set of fields
-func (rs *RuleSet) IsDiscarder(ctx *eval.Context, fields []eval.Field, rules []*Rule) (bool, *Rule, error) {
-	var isDiscarder bool
-	key := eval.PartialKey(fields)
+func (rs *RuleSet) getDiscarderPlan(fields []eval.Field, key string, rules []*Rule) *discarderPlan {
+	planKey := discarderPlanKey{
+		rulesPtr: unsafe.SliceData(rules),
+		rulesLen: len(rules),
+		key:      key,
+	}
 
+	rs.discarderPlansLock.RLock()
+	plan := rs.discarderPlans[planKey]
+	rs.discarderPlansLock.RUnlock()
+	if plan != nil {
+		return plan
+	}
+
+	built := &discarderPlan{}
 	for _, rule := range rules {
-		// ignore rule that can't generate discarders
 		if _, exists := rs.opts.ExcludedRuleFromDiscarders[rule.ID]; exists {
 			continue
 		}
 
-		isTrue, err := rule.PartialEvalWithKey(ctx, fields, key)
-		if err != nil || isTrue {
-			return false, rule, err
+		state, evalFnc, err := rule.GetPartialEvalState(fields, key)
+		if err != nil {
+			built.blockedRule = rule
+			built.blockedErr = err
+			break
 		}
 
-		isDiscarder = true
+		built.hasRules = true
+		switch state {
+		case eval.PartialEvalConstTrue:
+			if built.blockedRule == nil {
+				built.blockedRule = rule
+			}
+		case eval.PartialEvalConstFalse:
+		default:
+			if built.blockedRule == nil {
+				built.evals = append(built.evals, discarderRuleEval{
+					rule: rule,
+					eval: evalFnc,
+				})
+			}
+		}
 	}
-	return isDiscarder, nil, nil
+
+	rs.discarderPlansLock.Lock()
+	if rs.discarderPlans == nil {
+		rs.discarderPlans = make(map[discarderPlanKey]*discarderPlan)
+	}
+	rs.discarderPlans[planKey] = built
+	rs.discarderPlansLock.Unlock()
+
+	return built
+}
+
+// IsDiscarder partially evaluates an Event against a set of fields
+func (rs *RuleSet) IsDiscarder(ctx *eval.Context, fields []eval.Field, rules []*Rule) (bool, *Rule, error) {
+	if len(rules) == 0 {
+		return false, nil, nil
+	}
+
+	key := eval.PartialKey(fields)
+	plan := rs.getDiscarderPlan(fields, key, rules)
+	if plan.blockedRule != nil || !plan.hasRules {
+		return false, plan.blockedRule, plan.blockedErr
+	}
+
+	for i := range plan.evals {
+		if plan.evals[i].eval(ctx) {
+			return false, plan.evals[i].rule, nil
+		}
+	}
+	return true, nil, nil
 }
 
 func (rs *RuleSet) runSetActions(_ eval.Event, ctx *eval.Context, rule *Rule) error {
