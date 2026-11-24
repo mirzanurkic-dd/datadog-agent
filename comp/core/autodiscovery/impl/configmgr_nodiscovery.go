@@ -19,5 +19,7 @@ func initDiscoveryWorker(_ *reconcilingConfigManager, _ discoverer.ConfigDiscove
 
 func (cm *reconcilingConfigManager) scheduleDiscovery(_, _, _ string) {}
 
-func (cm *reconcilingConfigManager) start() {}
-func (cm *reconcilingConfigManager) stop()  {}
+func (cm *reconcilingConfigManager) start() {
+	cm.seedReportedIssuesFromStore()
+}
+func (cm *reconcilingConfigManager) stop() {}

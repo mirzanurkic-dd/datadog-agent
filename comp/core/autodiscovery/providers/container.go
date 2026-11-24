@@ -196,6 +196,12 @@ func (k *ContainerConfigProvider) updateHealthError(entityName string, errors ty
 // newer state while reporting is blocked. Using one worker preserves the order
 // of reports and resolutions for each entity.
 func (k *ContainerConfigProvider) reportHealthErrors(ctx context.Context) {
+	// reportedEntities holds the entities with an active AD annotation issue,
+	// seeded with those restored from the previous run. Only these need a
+	// clear when they become healthy: every running container emits a healthy
+	// event at startup, and a no-op resolution for each would flood the store's
+	// queue. Accessed only from this goroutine.
+	reportedEntities := activeADAnnotationEntities(k.healthPlatform)
 	for {
 		select {
 		case <-ctx.Done():
@@ -211,9 +217,12 @@ func (k *ContainerConfigProvider) reportHealthErrors(ctx context.Context) {
 					return
 				}
 				if err.errors == nil {
-					clearConfigurationErrors(k.healthPlatform, entityName)
-				} else {
-					reportConfigurationError(k.healthPlatform, entityName, err.errors, err.source)
+					if _, reported := reportedEntities[entityName]; reported {
+						delete(reportedEntities, entityName)
+						clearConfigurationErrors(k.healthPlatform, entityName)
+					}
+				} else if reportConfigurationError(k.healthPlatform, entityName, err.errors, err.source) {
+					reportedEntities[entityName] = struct{}{}
 				}
 			}
 		}

@@ -413,9 +413,12 @@ func (ac *AutoConfig) start() {
 	listeners.RegisterListeners(ac.serviceListenerFactories)
 	providers.RegisterProviders(ac.providerCatalog)
 	setupAcErrors()
+	// Start the config manager before the service listener: it seeds the
+	// health issues restored from the previous run, and a service reconciled
+	// before that would skip clearing a template issue it does not know of.
+	ac.cfgMgr.start()
 	// Start the service listener
 	go ac.serviceListening()
-	ac.cfgMgr.start()
 }
 
 // stop just shuts down AutoConfig in a clean way.

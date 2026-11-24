@@ -53,6 +53,7 @@ func (cm *reconcilingConfigManager) scheduleDiscovery(svcID, tplDigest, integrat
 }
 
 func (cm *reconcilingConfigManager) start() {
+	cm.seedReportedIssuesFromStore()
 	cm.discoveryWorker.Start()
 }
 

@@ -100,10 +100,11 @@ func adAnnotationIssueID(entityName string) string {
 // reportConfigurationError reports the AD configuration errors for an entity to
 // the health platform. It is shared by the container, service, and endpoint
 // config providers so that Autodiscovery annotation misconfigurations surface
-// consistently regardless of which provider parsed them.
-func reportConfigurationError(hp healthplatformdef.Component, entityName string, errMsgSet types.ErrorMsgSet, errorSource types.ErrorSource) {
+// consistently regardless of which provider parsed them. It returns whether
+// the report was queued.
+func reportConfigurationError(hp healthplatformdef.Component, entityName string, errMsgSet types.ErrorMsgSet, errorSource types.ErrorSource) bool {
 	if hp == nil {
-		return
+		return false
 	}
 
 	// Sort error messages for stable issue content across reports.
@@ -134,7 +135,26 @@ func reportConfigurationError(hp healthplatformdef.Component, entityName string,
 	}
 	if err := hp.ReportIssue(issue); err != nil {
 		log.Debugf("Failed to report AD annotation issue for %s: %v", entityName, err)
+		return false
 	}
+	return true
+}
+
+// activeADAnnotationEntities returns the entity names with an active AD
+// annotation issue in the health platform, including issues restored from the
+// previous run.
+func activeADAnnotationEntities(hp healthplatformdef.Component) map[string]struct{} {
+	entities := make(map[string]struct{})
+	if hp == nil {
+		return entities
+	}
+	prefix := adAnnotationIssueID("")
+	for _, id := range hp.GetActiveIssueIDsByIssueName(admisconfig.AnnotationIssueName) {
+		if entityName, ok := strings.CutPrefix(id, prefix); ok && entityName != "" {
+			entities[entityName] = struct{}{}
+		}
+	}
+	return entities
 }
 
 // clearConfigurationErrors resolves any previously reported AD configuration

@@ -29,6 +29,7 @@ import (
 	workloadmeta "github.com/DataDog/datadog-agent/comp/core/workloadmeta/def"
 	workloadmetafxmock "github.com/DataDog/datadog-agent/comp/core/workloadmeta/fx-mock"
 	workloadmetamock "github.com/DataDog/datadog-agent/comp/core/workloadmeta/mock"
+	admisconfig "github.com/DataDog/datadog-agent/comp/healthplatform/issues/ad-misconfiguration"
 	healthplatformmock "github.com/DataDog/datadog-agent/comp/healthplatform/store/mock"
 	healthplatformnoop "github.com/DataDog/datadog-agent/comp/healthplatform/store/noop-impl"
 	"github.com/DataDog/datadog-agent/pkg/util/fxutil"
@@ -76,13 +77,19 @@ func (h *blockingContainerHealth) ResolveIssue(id string) {
 	h.completed <- "resolve:" + id
 }
 
-func newContainerHealthTestStream(t *testing.T, reportRelease, resolveRelease <-chan struct{}) (*ContainerConfigProvider, *containerHealthTestStore, *blockingContainerHealth, <-chan integration.ConfigChanges) {
+// newContainerHealthTestStream starts a provider stream. restored issues are
+// added to the health platform before the stream starts, the way the store
+// restores persisted issues before Autodiscovery runs after an Agent restart.
+func newContainerHealthTestStream(t *testing.T, reportRelease, resolveRelease <-chan struct{}, restored ...*healthplatformpayload.Issue) (*ContainerConfigProvider, *containerHealthTestStore, *blockingContainerHealth, <-chan integration.ConfigChanges) {
 	t.Helper()
 	store := &containerHealthTestStore{events: make(chan workloadmeta.EventBundle)}
 	hp := &blockingContainerHealth{
 		Mock: healthplatformmock.New(t), reportStarted: make(chan string, 10),
 		resolveStarted: make(chan string, 10), completed: make(chan string, 10),
 		reportRelease: reportRelease, resolveRelease: resolveRelease,
+	}
+	for _, issue := range restored {
+		require.NoError(t, hp.Mock.ReportIssue(issue))
 	}
 	provider, err := NewContainerConfigProvider(nil, store, nil, nil, hp, nil)
 	require.NoError(t, err)
@@ -185,13 +192,32 @@ func TestContainerHealthResolveDoesNotBlockStream(t *testing.T) {
 }
 
 func TestContainerHealthResolvesRestoredIssue(t *testing.T) {
-	_, store, hp, changes := newContainerHealthTestStream(t, nil, nil)
 	container := basicDockerContainer()
 	issueID := adAnnotationIssueID(buildEntityName(container))
-	require.NoError(t, hp.Mock.ReportIssue(&healthplatformpayload.Issue{Id: issueID, IssueName: "restored"}))
+	_, store, hp, changes := newContainerHealthTestStream(t, nil, nil,
+		&healthplatformpayload.Issue{Id: issueID, IssueName: admisconfig.AnnotationIssueName})
 	processContainerHealthTestEvent(t, store, changes, workloadmeta.EventTypeSet, container)
 	assert.Equal(t, "resolve:"+issueID, receiveContainerHealthCall(t, hp.completed))
 	assert.Nil(t, hp.GetIssue(issueID), "a valid entity must clear issues restored before this provider started")
+}
+
+func TestContainerHealthSkipsClearForEntityWithoutIssue(t *testing.T) {
+	cp, store, hp, changes := newContainerHealthTestStream(t, nil, nil)
+	container := basicDockerContainer()
+	processContainerHealthTestEvent(t, store, changes, workloadmeta.EventTypeSet, container)
+	// The worker takes the pending update when it processes it.
+	require.Eventually(t, func() bool {
+		cp.healthUpdatesMu.Lock()
+		defer cp.healthUpdatesMu.Unlock()
+		return len(cp.pendingHealthUpdates) == 0
+	}, 5*time.Second, time.Millisecond, "health worker did not take the update")
+	// A healthy entity with an issue would resolve now; one without must not.
+	bad := basicDockerContainer()
+	bad.ID = "other"
+	bad.Labels["com.datadoghq.ad.check_names"] = "["
+	processContainerHealthTestEvent(t, store, changes, workloadmeta.EventTypeSet, bad)
+	assert.Equal(t, "report:"+adAnnotationIssueID(buildEntityName(bad)), receiveContainerHealthCall(t, hp.completed),
+		"the healthy entity must not have sent a resolution first")
 }
 
 func TestProcessEvents(t *testing.T) {

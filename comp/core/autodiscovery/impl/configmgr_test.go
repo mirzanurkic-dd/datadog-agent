@@ -765,11 +765,56 @@ func TestResolveTemplateForService_ClearsHealthPlatformOnSuccess(t *testing.T) {
 	count, _ := hp.GetAllIssues()
 	require.Equal(t, 1, count)
 
+	// start seeds the issues restored from the previous run, as on a restart.
+	cm.start()
+	t.Cleanup(cm.stop)
+
 	_, ok := cm.resolveTemplateForService(tpl, svc)
 	assert.True(t, ok)
 
 	count, _ = hp.GetAllIssues()
 	assert.Equal(t, 0, count, "health issue should be cleared after successful resolution")
+}
+
+func TestResolveTemplateForService_SkipsClearWithoutIssue(t *testing.T) {
+	hp := healthplatformmock.New(t)
+	cm := newReconcilingConfigManager(&MockSecretResolver{}, hp, nil, nil, nil, noopConfigPublisher).(*reconcilingConfigManager)
+	cm.start()
+	t.Cleanup(cm.stop)
+
+	tpl := integration.Config{Name: "redis", ADIdentifiers: []string{"redis"}, LogsConfig: []byte("source: %%host%%")}
+	svc := &dummyService{ID: "docker://def456", ADIdentifiers: []string{"redis"}, Hosts: map[string]string{"main": "myhost"}}
+
+	_, ok := cm.resolveTemplateForService(tpl, svc)
+	assert.True(t, ok)
+	assert.Empty(t, hp.ResolvedIDs(), "a template that never failed must not send a resolution to the store's queue")
+}
+
+func TestRemovedServiceClearsTemplateIssue(t *testing.T) {
+	hp := healthplatformmock.New(t)
+	cm := newReconcilingConfigManager(&MockSecretResolver{}, hp, nil, nil, nil, noopConfigPublisher).(*reconcilingConfigManager)
+
+	tpl := integration.Config{
+		Name:          "postgres",
+		ADIdentifiers: []string{"postgres"},
+		Instances:     []integration.Data{integration.Data("host: %%host%%\ntags:\n  - dbid:%%extra_dbinstanceidentifier%%")},
+		Provider:      "file",
+		Source:        "file:/etc/datadog-agent/conf.d/postgres.d/conf.yaml",
+	}
+	svc := &dummyServiceWithExtraConfigError{dummyService: dummyService{
+		ID:            "docker://abc123",
+		ADIdentifiers: []string{"postgres"},
+		Hosts:         map[string]string{"main": "myhost"},
+	}}
+	issueID := admisconfig.TemplateIssueID + ":postgres:docker://abc123:" + tpl.Digest()
+
+	cm.processNewConfig(tpl)
+	cm.processNewService(svc)
+	require.NotNil(t, hp.GetIssue(issueID), "the failed template must be reported")
+
+	cm.processDelService(svc)
+	assert.Nil(t, hp.GetIssue(issueID), "removing the service must clear its template issue")
+	assert.Empty(t, cm.reportedIssues, "nothing may stay tracked for a removed service")
 }
 
 func TestResolveTemplateForService_SkipsReportWhenServiceNotReady(t *testing.T) {

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"strings"
 	"sync"
 
 	healthplatformpayload "github.com/DataDog/agent-payload/v5/healthplatform"
@@ -140,6 +141,13 @@ type reconcilingConfigManager struct {
 	healthPlatform healthplatformdef.Component
 	telemetryStore *actelemetry.Store
 
+	// reportedIssues holds the template issue IDs reported to the health
+	// platform and not cleared since, including those restored from the
+	// previous run (see seedReportedIssuesFromStore). Clears are sent only for
+	// these: every successful template resolution clears, and sending a
+	// no-op resolution for each would flood the store's queue at startup.
+	reportedIssues map[string]struct{}
+
 	discoveryState //nolint:unused
 }
 
@@ -160,6 +168,7 @@ func newReconcilingConfigManager(secretResolver secrets.Component, healthPlatfor
 		secretResolver:         secretResolver,
 		healthPlatform:         healthPlatform,
 		telemetryStore:         telStore,
+		reportedIssues:         map[string]struct{}{},
 	}
 	initDiscoveryWorker(cm, disco)
 	return cm
@@ -461,6 +470,11 @@ func (cm *reconcilingConfigManager) reconcileService(svcID string) integration.C
 	// removed, this is empty.
 	expectedResolutions := cm.expectedFilteredTemplatesLocked(svcID)
 
+	// A template that failed to resolve has no entry in existingResolutions,
+	// so the loop below never clears its issue: clear it here once the
+	// service no longer uses the template, including when it is removed.
+	cm.clearTemplateIssuesNotExpected(svcID, expectedResolutions)
+
 	// compare existing to expected, generating changes and modifying
 	// existingResolutions in-place
 	for templateDigest, resolvedDigest := range existingResolutions {
@@ -557,7 +571,9 @@ func (cm *reconcilingConfigManager) reportTemplateResolutionFailure(tpl integrat
 	}
 	if reportErr := cm.healthPlatform.ReportIssue(issue); reportErr != nil {
 		log.Debugf("Failed to report template resolution issue: %v", reportErr)
+		return
 	}
+	cm.reportedIssues[issueID] = struct{}{}
 }
 
 // clearTemplateResolutionFailure clears a previously reported template resolution failure.
@@ -565,8 +581,7 @@ func (cm *reconcilingConfigManager) clearTemplateResolutionFailure(tpl integrati
 	if cm.healthPlatform == nil {
 		return
 	}
-	issueID := admisconfig.TemplateIssueID + ":" + tpl.Name + ":" + svc.GetServiceID() + ":" + tpl.Digest()
-	cm.healthPlatform.ResolveIssue(issueID)
+	cm.resolveReportedIssue(admisconfig.TemplateIssueID + ":" + tpl.Name + ":" + svc.GetServiceID() + ":" + tpl.Digest())
 }
 
 // clearTemplateResolutionFailureByID clears a health issue using string identifiers.
@@ -575,8 +590,54 @@ func (cm *reconcilingConfigManager) clearTemplateResolutionFailureByID(tplName, 
 	if cm.healthPlatform == nil {
 		return
 	}
-	issueID := admisconfig.TemplateIssueID + ":" + tplName + ":" + svcID + ":" + tplDigest
+	cm.resolveReportedIssue(admisconfig.TemplateIssueID + ":" + tplName + ":" + svcID + ":" + tplDigest)
+}
+
+// resolveReportedIssue resolves issueID if it was reported and not cleared
+// since. Must be called with cm.m held.
+func (cm *reconcilingConfigManager) resolveReportedIssue(issueID string) {
+	if _, reported := cm.reportedIssues[issueID]; !reported {
+		return
+	}
+	delete(cm.reportedIssues, issueID)
 	cm.healthPlatform.ResolveIssue(issueID)
+}
+
+// clearTemplateIssuesNotExpected resolves the reported template issues of
+// svcID whose template is not in expected. Template issue IDs end in
+// ":<service ID>:<template digest>", and digests contain no colon. Must be
+// called with cm.m held.
+func (cm *reconcilingConfigManager) clearTemplateIssuesNotExpected(svcID string, expected map[string]integration.Config) {
+	if len(cm.reportedIssues) == 0 {
+		return
+	}
+	marker := ":" + svcID + ":"
+	for issueID := range cm.reportedIssues {
+		i := strings.LastIndex(issueID, ":")
+		if i < 0 || !strings.HasSuffix(issueID[:i+1], marker) {
+			continue
+		}
+		if _, ok := expected[issueID[i+1:]]; !ok {
+			cm.resolveReportedIssue(issueID)
+		}
+	}
+}
+
+// seedReportedIssuesFromStore adds the template issues the health platform
+// restored from the previous run to reportedIssues, so they are cleared once
+// their template resolves. It runs from start, before any service is
+// reconciled, and after the store loaded its persisted state.
+func (cm *reconcilingConfigManager) seedReportedIssuesFromStore() {
+	if cm.healthPlatform == nil {
+		return
+	}
+	// Called without cm.m held: the store takes its own lock.
+	ids := cm.healthPlatform.GetActiveIssueIDsByIssueName(admisconfig.TemplateIssueName)
+	cm.m.Lock()
+	defer cm.m.Unlock()
+	for _, issueID := range ids {
+		cm.reportedIssues[issueID] = struct{}{}
+	}
 }
 
 func (cm *reconcilingConfigManager) addStaticConfigIndex(config integration.Config) {
