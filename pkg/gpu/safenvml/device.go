@@ -241,9 +241,7 @@ type DeviceInfo struct {
 
 	// C2CLinkCount is the number of NVLink-C2C links between the GPU and its host
 	// CPU (Grace Hopper, Grace Blackwell). Zero on GPUs attached to the host over
-	// PCIe only, which is every other system. A non-zero count means the GPU's
-	// PCIe link is a sideband that the driver negotiates down by design, so its
-	// negotiated width and generation carry no health or topology meaning.
+	// PCIe only, which is every other system.
 	C2CLinkCount int
 
 	// Index of the device in the host. For MIG devices, this is the index of the MIG device in the parent device.

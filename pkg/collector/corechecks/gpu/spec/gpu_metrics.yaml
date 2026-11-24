@@ -2444,8 +2444,7 @@ metrics:
       description: >-
         Whether the current PCI link speed is lower than the max PCI link speed.
         Always 0 on GPUs attached to their host CPU over NVLink-C2C (Grace Hopper,
-        Grace Blackwell), where the PCIe link is a sideband that the driver
-        negotiates down by design and bulk host traffic flows over NVLink-C2C.
+        Grace Blackwell).
     tagsets:
       - device
     validator:
@@ -2494,8 +2493,7 @@ metrics:
       description: >-
         Whether the current PCI link width is lower than the max PCI link width.
         Always 0 on GPUs attached to their host CPU over NVLink-C2C (Grace Hopper,
-        Grace Blackwell), where the PCIe link is a sideband that the driver
-        negotiates down by design and bulk host traffic flows over NVLink-C2C.
+        Grace Blackwell).
     tagsets:
       - device
     validator:
