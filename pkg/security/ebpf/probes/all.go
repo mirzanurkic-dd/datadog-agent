@@ -344,6 +344,9 @@ func AllMapSpecEditors(numCPU int, opts MapSpecEditorOpts, kv *kernel.Version) m
 			MaxEntries: superReducedProcPidCacheSize,
 			EditorFlag: manager.EditMaxEntries,
 		}
+	}
+
+	if opts.EventSamplingOpenEnabled || opts.EventSamplingBindEnabled || opts.EventSamplingConnectEnabled || opts.EventSamplingSyscallsEnabled {
 		editors["excluded_cgroups"] = manager.MapSpecEditor{
 			MaxEntries: ExcludedCgroupsMaxEntries,
 			EditorFlag: manager.EditMaxEntries,

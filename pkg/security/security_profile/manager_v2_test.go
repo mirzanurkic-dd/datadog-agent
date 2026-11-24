@@ -2165,3 +2165,81 @@ func TestManagerV2_ActivityDumpCLI(t *testing.T) {
 		wg.Wait()
 	})
 }
+
+func TestManagerV2_isCGroupExclusionEnabled(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		cfg      config.RuntimeSecurityConfig
+		expected bool
+	}{
+		{
+			name:     "disabled when v2 and sampling disabled",
+			cfg:      config.RuntimeSecurityConfig{},
+			expected: false,
+		},
+		{
+			name: "disabled when only exec and dns enabled without sampling",
+			cfg: config.RuntimeSecurityConfig{
+				SecurityProfileEnabled:   true,
+				SecurityProfileV2Enabled: true,
+				SecurityProfileV2EventTypes: []model.EventType{
+					model.ExecEventType,
+					model.DNSEventType,
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "enabled when syscalls v2 enabled",
+			cfg: config.RuntimeSecurityConfig{
+				SecurityProfileEnabled:   true,
+				SecurityProfileV2Enabled: true,
+				SecurityProfileV2EventTypes: []model.EventType{
+					model.SyscallsEventType,
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "enabled when open event sampling enabled",
+			cfg: config.RuntimeSecurityConfig{
+				SecurityProfileEnabled:   true,
+				SecurityProfileV2Enabled: true,
+				SecurityProfileV2EventTypes: []model.EventType{
+					model.FileOpenEventType,
+				},
+				EventSamplingOpenEnabled: true,
+			},
+			expected: true,
+		},
+		{
+			name: "enabled when connect event sampling enabled",
+			cfg: config.RuntimeSecurityConfig{
+				SecurityProfileEnabled:   true,
+				SecurityProfileV2Enabled: true,
+				SecurityProfileV2EventTypes: []model.EventType{
+					model.ConnectEventType,
+				},
+				EventSamplingConnectEnabled: true,
+			},
+			expected: true,
+		},
+		{
+			name: "enabled when bind event sampling enabled",
+			cfg: config.RuntimeSecurityConfig{
+				SecurityProfileEnabled:   true,
+				SecurityProfileV2Enabled: true,
+				SecurityProfileV2EventTypes: []model.EventType{
+					model.BindEventType,
+				},
+				EventSamplingBindEnabled: true,
+			},
+			expected: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &ManagerV2{config: &config.Config{RuntimeSecurity: &tc.cfg}}
+			assert.Equal(t, tc.expected, m.isCGroupExclusionEnabled())
+		})
+	}
+}

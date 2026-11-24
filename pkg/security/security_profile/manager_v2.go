@@ -395,6 +395,14 @@ func (m *ManagerV2) eventMetricsFor(source model.EventSource, et model.EventType
 	return m.eventMetrics[src][et]
 }
 
+func (m *ManagerV2) isCGroupExclusionEnabled() bool {
+	cfg := m.config.RuntimeSecurity
+	return cfg.SecurityProfileV2EnabledFor(model.SyscallsEventType) ||
+		cfg.EventSamplingEnabledFor(model.FileOpenEventType) ||
+		cfg.EventSamplingEnabledFor(model.ConnectEventType) ||
+		cfg.EventSamplingEnabledFor(model.BindEventType)
+}
+
 func (m *ManagerV2) Start(ctx context.Context) {
 	sendTickerChan := m.setupPersistenceTicker()
 	nodeEvictionTickerChan := m.setupNodeEvictionTicker()
@@ -406,8 +414,8 @@ func (m *ManagerV2) Start(ctx context.Context) {
 		seclog.Errorf("failed to register cgroup deletion listener: %v", err)
 	}
 
-	// Register listener for cgroup creations to exclude host/systemd cgroups from the syscall sampler
-	if m.config.RuntimeSecurity.SecurityProfileV2EnabledFor(model.SyscallsEventType) {
+	// Register listener for cgroup creations to exclude host/systemd cgroups from the v2 samplers
+	if m.isCGroupExclusionEnabled() {
 		if err := m.resolvers.CGroupResolver.RegisterListener(cgroup.CGroupCreated, m.onCGroupCreated); err != nil {
 			seclog.Errorf("failed to register cgroup creation listener: %v", err)
 		} else {
@@ -511,7 +519,7 @@ func (m *ManagerV2) onCGroupCreated(cgce *cgroupModel.CacheEntry) {
 func (m *ManagerV2) onCGroupDeleted(cgce *cgroupModel.CacheEntry) {
 	cgroupID := cgce.GetCGroupID()
 
-	if m.excludedCgroupsMap != nil && m.config.RuntimeSecurity.SecurityProfileV2EnabledFor(model.SyscallsEventType) {
+	if m.excludedCgroupsMap != nil && m.isCGroupExclusionEnabled() {
 		inode := cgce.GetCGroupInode()
 		if err := m.excludedCgroupsMap.Delete(inode); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
 			seclog.Debugf("couldn't remove cgroup inode %d from exclusion map: %v", inode, err)
@@ -750,8 +758,8 @@ func (m *ManagerV2) ProcessEvent(event *model.Event) {
 
 	// Filter out systemd cgroups for now, we will add support for them later
 	if event.ProcessContext.Process.ContainerContext.IsNull() {
-		// A host/systemd cgroup that slipped a syscall sample through before being excluded: exclude it now.
-		if event.Error == nil && m.excludedCgroupsMap != nil && event.GetEventType() == model.SyscallsEventType && m.config.RuntimeSecurity.SecurityProfileV2EnabledFor(model.SyscallsEventType) {
+		// A host/systemd cgroup that slipped an event through before being excluded: exclude it now.
+		if event.Error == nil && m.excludedCgroupsMap != nil && m.isCGroupExclusionEnabled() {
 			if inode := event.ProcessContext.Process.CGroup.CGroupPathKey.Inode; inode != 0 {
 				if err := m.excludedCgroupsMap.Put(inode, uint8(1)); err != nil {
 					seclog.Debugf("couldn't exclude cgroup inode %d from sampling: %v", inode, err)
