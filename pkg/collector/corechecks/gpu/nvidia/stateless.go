@@ -475,8 +475,35 @@ func fabricHealthToSamples(info nvml.GpuFabricInfo_v3) []Sample {
 	return samples
 }
 
+// hostLinkTag identifies how the GPU reaches its host CPU on the PCIe link
+// degradation metrics, so a link that is negotiated down by design is
+// distinguishable from one that is actually degraded.
+const hostLinkTag = "host_link"
+
+const (
+	hostLinkPCIe = "pcie"
+	hostLinkC2C  = "nvlink_c2c"
+)
+
+// hostLinkTags returns the host_link tag of the device as a fresh slice, as
+// collectors append device tags to each sample's own slice.
+func hostLinkTags(c2c bool) []string {
+	if c2c {
+		return []string{hostLinkTag + ":" + hostLinkC2C}
+	}
+	return []string{hostLinkTag + ":" + hostLinkPCIe}
+}
+
 func pcieLinkMetrics(device ddnvml.Device) ([]Sample, uint64, error) {
 	var samplesOut []Sample
+
+	// On Grace Hopper and Grace Blackwell the GPU reaches its host CPU over NVLink-C2C
+	// and the PCIe link is only a sideband, which the driver negotiates down by design
+	// (Gen4 x1 of x16 max on GB200). Comparing current against max there reports every
+	// GPU as permanently degraded, hiding real PCIe degradations elsewhere, so the
+	// comparison is only made for GPUs actually attached over PCIe. The current and max
+	// values are still reported, tagged with the host link protocol that explains them.
+	c2c := device.GetDeviceInfo().IsC2CEnabled()
 
 	currentWidth, err := device.GetCurrPcieLinkWidth()
 	if err != nil {
@@ -489,7 +516,12 @@ func pcieLinkMetrics(device ddnvml.Device) ([]Sample, uint64, error) {
 		return samplesOut, 0, fmt.Errorf("get max PCIe link width: %w", err)
 	}
 	samplesOut = append(samplesOut, &Metric{Name: "pci.link.width.max", Value: float64(maxWidth), Type: metrics.GaugeType})
-	samplesOut = append(samplesOut, &Metric{Name: "pci.link.width.degraded", Value: boolToFloat(currentWidth < maxWidth), Type: metrics.GaugeType})
+	samplesOut = append(samplesOut, &Metric{
+		baseSample: baseSample{tags: hostLinkTags(c2c)},
+		Name:       "pci.link.width.degraded",
+		Value:      boolToFloat(!c2c && currentWidth < maxWidth),
+		Type:       metrics.GaugeType,
+	})
 
 	currentGeneration, err := device.GetCurrPcieLinkGeneration()
 	if err != nil {
@@ -510,7 +542,12 @@ func pcieLinkMetrics(device ddnvml.Device) ([]Sample, uint64, error) {
 		return samplesOut, 0, fmt.Errorf("compute max PCIe link speed: %w", err)
 	}
 	samplesOut = append(samplesOut, &Metric{Name: "pci.link.speed.max", Value: maxSpeed, Type: metrics.GaugeType})
-	samplesOut = append(samplesOut, &Metric{Name: "pci.link.speed.degraded", Value: boolToFloat(currentSpeed < maxSpeed), Type: metrics.GaugeType})
+	samplesOut = append(samplesOut, &Metric{
+		baseSample: baseSample{tags: hostLinkTags(c2c)},
+		Name:       "pci.link.speed.degraded",
+		Value:      boolToFloat(!c2c && currentSpeed < maxSpeed),
+		Type:       metrics.GaugeType,
+	})
 	return samplesOut, 0, nil
 }
 

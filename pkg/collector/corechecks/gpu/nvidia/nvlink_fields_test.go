@@ -17,6 +17,14 @@ import (
 	"github.com/DataDog/datadog-agent/pkg/metrics"
 )
 
+// isDeviceConstructionFieldRequest reports whether a field-value request is one of
+// the static queries safenvml makes while constructing the device (link counts),
+// which tests counting collector requests must ignore.
+func isDeviceConstructionFieldRequest(fv []nvml.FieldValue) bool {
+	return len(fv) > 0 &&
+		(fv[0].FieldId == nvml.FI_DEV_NVLINK_LINK_COUNT || fv[0].FieldId == nvml.FI_DEV_C2C_LINK_COUNT)
+}
+
 func TestNVLinkFieldsCollectorQueriesAllConfiguredPorts(t *testing.T) {
 	var requests [][]nvml.FieldValue
 	device := setupMockDevice(t, testutil.WithCustomHook(func(d *testutil.MockDevice) {
@@ -29,7 +37,7 @@ func TestNVLinkFieldsCollectorQueriesAllConfiguredPorts(t *testing.T) {
 				}
 				testutil.ApplyMockFieldValue(&fv[i], testutil.DefaultFieldValues[fv[i].FieldId])
 			}
-			if fv[0].FieldId != nvml.FI_DEV_NVLINK_LINK_COUNT {
+			if !isDeviceConstructionFieldRequest(fv) {
 				requests = append(requests, append([]nvml.FieldValue(nil), fv...))
 			}
 			return nvml.SUCCESS
@@ -78,7 +86,7 @@ func TestNVLinkFieldsCollectorQueriesForcedScopeForEachPort(t *testing.T) {
 				}
 				testutil.ApplyMockFieldValue(&fv[i], testutil.DefaultFieldValues[fv[i].FieldId])
 			}
-			if fv[0].FieldId != nvml.FI_DEV_NVLINK_LINK_COUNT {
+			if !isDeviceConstructionFieldRequest(fv) {
 				requests = append(requests, append([]nvml.FieldValue(nil), fv...))
 			}
 			return nvml.SUCCESS

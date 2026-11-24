@@ -63,11 +63,14 @@ Run one or more of these three validation levels:
 
 1. **Mocked NVML against spec** (`TestMetricsFollowSpec`):
 
-   `dda inv test --targets=./pkg/collector/corechecks/gpu -- -tags "test,nvml" -run TestMetricsFollowSpec`
+   `dda inv test --targets=./pkg/collector/corechecks/gpu --test-args="-test.run=TestMetricsFollowSpec"`
 
 2. **Real NVML APIs against spec** (`integrationtests`, requires real GPU + NVML):
 
-   `dda inv test --targets=./pkg/collector/corechecks/gpu/integrationtests -- -tags "nvml"`
+   `dda inv test --targets=./pkg/collector/corechecks/gpu/integrationtests`
+
+   `dda inv test` is a Bazel wrapper: it selects build tags itself, so tags cannot be
+   passed to it, and test-binary flags go through `--test-args`.
 
 3. **Live Datadog data against spec** (`spec/metrics-validator` through invoke task):
 

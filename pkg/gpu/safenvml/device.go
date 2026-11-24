@@ -239,11 +239,24 @@ type DeviceInfo struct {
 	// NVLinkVersion is the version reported by the device's NVLink links.
 	NVLinkVersion string
 
+	// C2CLinkCount is the number of NVLink-C2C links between the GPU and its host
+	// CPU (Grace Hopper, Grace Blackwell). Zero on GPUs attached to the host over
+	// PCIe only, which is every other system. A non-zero count means the GPU's
+	// PCIe link is a sideband that the driver negotiates down by design, so its
+	// negotiated width and generation carry no health or topology meaning.
+	C2CLinkCount int
+
 	// Index of the device in the host. For MIG devices, this is the index of the MIG device in the parent device.
 	Index int
 
 	// Memory size of the device in bytes
 	Memory uint64
+}
+
+// IsC2CEnabled reports whether the GPU reaches its host CPU over NVLink-C2C
+// rather than over PCIe.
+func (d *DeviceInfo) IsC2CEnabled() bool {
+	return d.C2CLinkCount > 0
 }
 
 // Device represents a GPU device, implementing SafeDevice and providing common device info
@@ -437,6 +450,9 @@ func (d *PhysicalDevice) fillMigChildren() error {
 		migChildDevice.MemoryBusWidth = d.MemoryBusWidth
 		// MIG slices do not have NVLink ports; keep the parent's protocol version for tags.
 		migChildDevice.NVLinkVersion = d.NVLinkVersion
+		// A MIG slice shares the physical GPU's link to the host, and the C2C field is
+		// not queryable on MIG handles.
+		migChildDevice.C2CLinkCount = d.C2CLinkCount
 		migChildDevice.CoreCount *= coresPerMultiprocessor(d.Architecture)
 
 		gpuInstanceID, err := migChildDevice.GetGpuInstanceId()
@@ -569,9 +585,42 @@ func (d *DeviceInfo) fillPhysicalDeviceData(dev SafeDevice) error {
 	}
 
 	d.fillNVLinkDataFromNVML(dev)
+	d.fillC2CDataFromNVML(dev)
 	d.fillStaticAttributes(dev)
 
 	return nil
+}
+
+// fillC2CDataFromNVML caches the device's NVLink-C2C link count. C2C is a static
+// property of the platform, so it is queried once per device rather than on every
+// collection cycle.
+func (d *DeviceInfo) fillC2CDataFromNVML(dev SafeDevice) {
+	fields := []nvml.FieldValue{{FieldId: nvml.FI_DEV_C2C_LINK_COUNT}}
+	if err := dev.GetFieldValues(fields); err != nil {
+		if !IsUnsupported(err) {
+			singleton.logDeviceWarning(d.UUID, "cannot get C2C link count: %v", err)
+		}
+		return
+	}
+	// PCIe-attached GPUs and drivers without the field report a non-success return
+	// for it. That is the common case, so it stays at zero ("no C2C") without a
+	// warning.
+	if ret := nvml.Return(fields[0].NvmlReturn); ret != nvml.SUCCESS {
+		log.Debugf("device %s does not report a C2C link count: %s", d.UUID, nvml.ErrorString(ret))
+		return
+	}
+
+	linkCount, err := nvmlFieldValueToInt(fields[0])
+	if err != nil {
+		singleton.logDeviceWarning(d.UUID, "cannot parse C2C link count: %v", err)
+		return
+	}
+	if linkCount < 0 {
+		singleton.logDeviceWarning(d.UUID, "C2C link count %d is negative", linkCount)
+		return
+	}
+
+	d.C2CLinkCount = linkCount
 }
 
 func (d *DeviceInfo) fillStaticAttributes(dev SafeDevice) {

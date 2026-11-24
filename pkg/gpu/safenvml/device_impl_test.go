@@ -102,6 +102,47 @@ func TestNewDeviceNVLinkLinkCount(t *testing.T) {
 	}
 }
 
+func TestNewDeviceC2CLinkCount(t *testing.T) {
+	tests := []struct {
+		name          string
+		options       []testutil.NvmlMockOption
+		expectedCount int
+	}{
+		{
+			name:          "c2c links present",
+			options:       []testutil.NvmlMockOption{testutil.WithC2CLinkCount(5)},
+			expectedCount: 5,
+		},
+		{
+			name:          "no c2c links",
+			options:       []testutil.NvmlMockOption{testutil.WithC2CLinkCount(0)},
+			expectedCount: 0,
+		},
+		{
+			name:          "unsupported c2c link count field",
+			options:       []testutil.NvmlMockOption{testutil.WithUnsupportedFields(nvml.FI_DEV_C2C_LINK_COUNT)},
+			expectedCount: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockNvml := testutil.NewMockNVML(
+				append(tt.options, testutil.WithSymbolsMock(allSymbols))...,
+			)
+			WithMockNVML(t, mockNvml)
+
+			nvmlDev, ret := mockNvml.DeviceGetHandleByIndex(0)
+			require.Equal(t, nvml.SUCCESS, ret)
+
+			device, err := NewPhysicalDevice(nvmlDev)
+			require.NoError(t, err)
+			require.Equal(t, tt.expectedCount, device.C2CLinkCount)
+			require.Equal(t, tt.expectedCount > 0, device.IsC2CEnabled())
+		})
+	}
+}
+
 func TestNewDeviceLogsNVLinkWarningOncePerDevice(t *testing.T) {
 	mockNvml := testutil.NewMockNVML(
 		testutil.WithSymbolsMock(allSymbols),

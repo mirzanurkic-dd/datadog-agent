@@ -536,6 +536,11 @@ func TestNVLinkCollector_Initialization(t *testing.T) {
 			mockOpts: []testutil.NvmlMockOption{testutil.WithCustomHook(func(device *testutil.MockDevice) {
 				device.GetFieldValuesFunc = func(values []nvml.FieldValue) nvml.Return {
 					require.Len(t, values, 1, "Expected one field value for total number of links, got %d", len(values))
+					if values[0].FieldId == nvml.FI_DEV_C2C_LINK_COUNT {
+						// Static query made while the device is constructed, not by the collector.
+						testutil.ApplyMockFieldValue(&values[0], testutil.NewFieldValue(0))
+						return nvml.SUCCESS
+					}
 					require.Equal(t, values[0].FieldId, uint32(nvml.FI_DEV_NVLINK_LINK_COUNT), "Expected field ID to be FI_DEV_NVLINK_LINK_COUNT, got %d", values[0].FieldId)
 					require.Equal(t, values[0].ScopeId, uint32(0), "Expected scope ID to be 0, got %d", values[0].ScopeId)
 					testutil.ApplyMockFieldValue(&values[0], testutil.NewFieldValue(4))
@@ -881,6 +886,8 @@ func TestPCIELinkMetrics(t *testing.T) {
 		maxWidth           int
 		currentGeneration  int
 		maxGeneration      int
+		c2cLinkCount       int
+		expectedHostLink   string
 		expectedMetricVals map[string]float64
 		expectedErr        string
 	}{
@@ -929,6 +936,25 @@ func TestPCIELinkMetrics(t *testing.T) {
 			},
 			expectedErr: "get max PCIe link width",
 		},
+		// A GB200 GPU reaches its host CPU over NVLink-C2C and reports its PCIe
+		// sideband as Gen4 x1 of x16 max by design, which must not be reported as
+		// a degradation.
+		"c2c link negotiated down by design": {
+			currentWidth:      1,
+			maxWidth:          16,
+			currentGeneration: 4,
+			maxGeneration:     4,
+			c2cLinkCount:      5,
+			expectedHostLink:  "host_link:nvlink_c2c",
+			expectedMetricVals: map[string]float64{
+				"pci.link.width.current":  1,
+				"pci.link.width.max":      16,
+				"pci.link.width.degraded": 0,
+				"pci.link.speed.current":  1.9692307692307693e9,
+				"pci.link.speed.max":      31.50769230769231e9,
+				"pci.link.speed.degraded": 0,
+			},
+		},
 		"current generation error emits width metrics": {
 			currentWidth:      8,
 			maxWidth:          16,
@@ -958,7 +984,7 @@ func TestPCIELinkMetrics(t *testing.T) {
 
 	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {
-			device := setupMockDevice(t, testutil.WithCustomHook(func(device *testutil.MockDevice) {
+			device := setupMockDevice(t, testutil.WithC2CLinkCount(test.c2cLinkCount), testutil.WithCustomHook(func(device *testutil.MockDevice) {
 				device.GetCurrPcieLinkWidthFunc = func() (int, nvml.Return) {
 					if test.currentWidth == -1 {
 						return 0, nvml.ERROR_UNKNOWN
@@ -992,11 +1018,20 @@ func TestPCIELinkMetrics(t *testing.T) {
 				require.ErrorContains(t, err, test.expectedErr)
 			}
 			require.Len(t, metricsOut, len(test.expectedMetricVals))
+			expectedHostLink := test.expectedHostLink
+			if expectedHostLink == "" {
+				expectedHostLink = "host_link:pcie"
+			}
 			for metricName, expectedValue := range test.expectedMetricVals {
 				metric := findMetric(metricsOut, metricName)
 				require.NotNil(t, metric, "expected metric %s", metricName)
 				require.InDelta(t, expectedValue, metric.Value, 1e6)
 				require.Equal(t, metrics.GaugeType, metric.Type)
+				if strings.HasSuffix(metricName, ".degraded") {
+					require.Equal(t, []string{expectedHostLink}, metric.Tags(), "metric %s", metricName)
+				} else {
+					require.Empty(t, metric.Tags(), "metric %s", metricName)
+				}
 			}
 		})
 	}
