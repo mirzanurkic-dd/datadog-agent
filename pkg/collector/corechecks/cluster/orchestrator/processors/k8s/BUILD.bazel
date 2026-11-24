@@ -43,7 +43,6 @@ go_library(
         "//comp/core/tagger/def",
         "//comp/core/tagger/tags",
         "//comp/core/tagger/types",
-        "//comp/core/workloadmeta/collectors/util",
         "//comp/core/workloadmeta/def",
         "//internal/third_party/kubernetes/pkg/kubelet/types",
         "//pkg/collector/corechecks/cluster/orchestrator/processors",
