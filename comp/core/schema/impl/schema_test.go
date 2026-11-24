@@ -36,6 +36,10 @@ properties:
     type: string
     pattern: "^https://"
     default: ""
+  dd_url:
+    type: string
+    pattern: "^(https://)?([^@]+@)?[a-z.]+$"
+    default: ""
 `
 	testSchema        *jsonschema.Schema
 	schemaCompileOnce sync.Once
@@ -225,6 +229,16 @@ func TestValidateConfigScrubsMessages(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, violations, 1)
 	assert.Equal(t, "at '/proxy_url': 'http://user:********@proxy.test' does not match pattern '^https://'", violations[0].Message)
+}
+
+func TestValidateConfigKeepsPatternOfScrubbedMessages(t *testing.T) {
+	// the pattern looks like URL credentials: only the value is scrubbed
+	v := newTestValidator(t)
+	cfg := fakeReader{schemaID: model.CoreSchema, settings: map[string]interface{}{"dd_url": "https://user:PRIVATE_PASSWORD@intake.test:123456"}}
+	violations, err := v.ValidateConfig(cfg)
+	require.NoError(t, err)
+	require.Len(t, violations, 1)
+	assert.Equal(t, "at '/dd_url': 'https://user:********@intake.test:123456' does not match pattern '^(https://)?([^@]+@)?[a-z.]+$'", violations[0].Message)
 }
 
 func TestValidateConfigSkipsSecretPlaceholders(t *testing.T) {
