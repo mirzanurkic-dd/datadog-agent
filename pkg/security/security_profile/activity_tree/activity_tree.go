@@ -559,6 +559,29 @@ func (at *ActivityTree) Contains(event *model.Event, insertMissingProcesses bool
 	return !newEntry, err
 }
 
+func resolveEventFieldsForActivityTree(event *model.Event) {
+	_ = event.FieldHandlers.ResolveAsync(event)
+	_ = event.FieldHandlers.ResolveEventTimestamp(event, &event.BaseEvent)
+
+	switch event.GetEventType() {
+	case model.FileOpenEventType:
+		_ = event.FieldHandlers.ResolveFilePath(event, &event.Open.File)
+		_ = event.FieldHandlers.ResolveFileBasename(event, &event.Open.File)
+		_ = event.FieldHandlers.ResolveFileFilesystem(event, &event.Open.File)
+	case model.NetworkFlowMonitorEventType:
+		_ = event.FieldHandlers.ResolveNetworkDeviceIfName(event, &event.NetworkFlowMonitor.Device)
+	case model.CapabilitiesEventType:
+		_ = event.FieldHandlers.ResolveCapabilitiesAttempted(event, &event.CapabilitiesUsage)
+		_ = event.FieldHandlers.ResolveCapabilitiesAttemptedHostUserNS(event, &event.CapabilitiesUsage)
+		_ = event.FieldHandlers.ResolveCapabilitiesUsed(event, &event.CapabilitiesUsage)
+		_ = event.FieldHandlers.ResolveCapabilitiesUsedHostUserNS(event, &event.CapabilitiesUsage)
+	case model.FileMountEventType:
+		_ = event.FieldHandlers.ResolveMountPointPath(event, &event.Mount)
+		_ = event.FieldHandlers.ResolveMountSourcePath(event, &event.Mount)
+		_ = event.FieldHandlers.ResolveMountRootPath(event, &event.Mount)
+	}
+}
+
 // insertEvent inserts the event in the activity tree, returns true if the event generated a new entry in the tree.
 // The returned *NodeBase is the event-level node (file, bind, etc.) when applicable, nil otherwise.
 func (at *ActivityTree) insertEvent(event *model.Event, dryRun bool, insertMissingProcesses bool, imageTagID uint64, generationType NodeGenerationType, resolvers *resolvers.EBPFResolvers) (bool, *ProcessNode, *NodeBase, error) {
@@ -580,7 +603,7 @@ func (at *ActivityTree) insertEvent(event *model.Event, dryRun bool, insertMissi
 		return false, nil, nil, ErrProcessNodeNotCreated
 	}
 
-	event.ResolveFieldsForAD()
+	resolveEventFieldsForActivityTree(event)
 
 	if event.Error != nil {
 		at.Stats.counts[event.GetEventType()].droppedCount[brokenEventReason].Inc()

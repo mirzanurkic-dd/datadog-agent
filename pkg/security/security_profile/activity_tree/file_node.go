@@ -117,6 +117,18 @@ func (fn *FileNode) sizeWithoutChildren() int64 {
 
 // NewFileNode returns a new FileActivityNode instance
 func NewFileNode(fileEvent *model.FileEvent, event *model.Event, name string, isPattern bool, imageTagID uint64, generationType NodeGenerationType, reducedFilePath string, resolvers *resolvers.EBPFResolvers) *FileNode {
+	if fileEvent != nil && event != nil && generationType != Snapshot {
+		_ = event.FieldHandlers.ResolveFileFieldsUser(event, &fileEvent.FileFields)
+		_ = event.FieldHandlers.ResolveFileFieldsGroup(event, &fileEvent.FileFields)
+		_ = event.FieldHandlers.ResolveFileFieldsInUpperLayer(event, &fileEvent.FileFields)
+		_ = event.FieldHandlers.ResolvePackageName(event, fileEvent)
+		_ = event.FieldHandlers.ResolvePackageVersion(event, fileEvent)
+		_ = event.FieldHandlers.ResolvePackageEpoch(event, fileEvent)
+		_ = event.FieldHandlers.ResolvePackageRelease(event, fileEvent)
+		_ = event.FieldHandlers.ResolvePackageSourceVersion(event, fileEvent)
+		_ = event.FieldHandlers.ResolvePackageSourceEpoch(event, fileEvent)
+		_ = event.FieldHandlers.ResolvePackageSourceRelease(event, fileEvent)
+	}
 	// call resolver. Safeguard: the process context might be empty if from a snapshot.
 	if resolvers != nil && fileEvent != nil && event.ProcessContext != nil {
 		resolvers.HashResolver.ComputeHashesFromEvent(event, fileEvent, 0)
