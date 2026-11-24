@@ -108,6 +108,10 @@ type EBPFResolver struct {
 	otelProcCtxPending map[uint32]time.Time
 	otelProcCtxLock    sync.Mutex
 
+	goLabelsQueue   chan uint32
+	goLabelsPending map[uint32]struct{}
+	goLabelsLock    sync.Mutex
+
 	// stats
 	hitsStats                    map[string]*atomic.Int64
 	missStats                    *atomic.Int64
@@ -1589,8 +1593,7 @@ func (p *EBPFResolver) applyTracerMetadata(pid uint32, tmeta tracermetadatamodel
 		return
 	}
 
-	err := p.resolveGoLabels(pid)
-	p.reportSpanCtx(spanCtxStepGoLabels, pid, err)
+	p.queueGoLabels(pid)
 }
 
 // ResolveOTelProcessContext queues the resolution of the OTel process context
@@ -1850,6 +1853,7 @@ func (p *EBPFResolver) Start(ctx context.Context) error {
 
 	go p.cacheFlush(ctx)
 	go p.resolveOTelProcessContextLoop(ctx)
+	go p.resolveGoLabelsLoop(ctx)
 
 	return nil
 }
@@ -2264,6 +2268,8 @@ func NewEBPFResolver(manager *manager.Manager, config *config.Config, statsdClie
 		userSessionResolver:          userSessionResolver,
 		otelProcCtxQueue:             make(chan uint32, otelProcCtxQueueSize),
 		otelProcCtxPending:           make(map[uint32]time.Time),
+		goLabelsQueue:                make(chan uint32, otelProcCtxQueueSize),
+		goLabelsPending:              make(map[uint32]struct{}),
 	}
 
 	for _, t := range metrics.AllTypesTags {
