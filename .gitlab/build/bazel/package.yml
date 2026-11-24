@@ -48,3 +48,9 @@ bazel:package:linux-amd64:
     BAZEL_PACKAGE_FLAGS: "--//:install_stripped_binaries"
     BAZEL_PACKAGE_TARGETS: "//packages/agent/linux:debian //packages/agent/linux:debian_dbg //packages/agent/linux:rpm //packages/agent/linux:rpm_dbg"
     BAZEL_PACKAGE_REQUIRED_FILES: test/required_files/agent
+
+bazel:package:heroku:linux-amd64:
+  extends: [.bazel:runner:linux-amd64, .bazel:package]
+  variables:
+    BAZEL_PACKAGE_FLAGS: "--//:install_stripped_binaries"
+    BAZEL_PACKAGE_TARGETS: "//packages/heroku:debian"

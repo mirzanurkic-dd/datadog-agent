@@ -50,6 +50,13 @@ PRODUCTS = {
         omnibus_jobs=('agent_deb-x64-a7', 'agent_rpm-x64-a7'),
         debug_package=True,
     ),
+    'heroku': Product(
+        'datadog-heroku-agent',
+        '//packages/heroku',
+        bazel_job='bazel:package:heroku:linux-amd64',
+        omnibus_jobs=('agent_heroku_deb-x64-a7',),
+        formats=('deb',),
+    ),
 }
 ARCHITECTURES = {'amd64': {'deb': 'amd64', 'rpm': 'x86_64'}}
 FORMATS = {'deb': read_deb_metadata, 'rpm': read_rpm_metadata}
