@@ -887,7 +887,6 @@ func TestPCIELinkMetrics(t *testing.T) {
 		currentGeneration  int
 		maxGeneration      int
 		c2cLinkCount       int
-		expectedHostLink   string
 		expectedMetricVals map[string]float64
 		expectedErr        string
 	}{
@@ -945,7 +944,6 @@ func TestPCIELinkMetrics(t *testing.T) {
 			currentGeneration: 4,
 			maxGeneration:     4,
 			c2cLinkCount:      5,
-			expectedHostLink:  "host_link:nvlink_c2c",
 			expectedMetricVals: map[string]float64{
 				"pci.link.width.current":  1,
 				"pci.link.width.max":      16,
@@ -1018,10 +1016,6 @@ func TestPCIELinkMetrics(t *testing.T) {
 				require.ErrorContains(t, err, test.expectedErr)
 			}
 			require.Len(t, metricsOut, len(test.expectedMetricVals))
-			expectedHostLink := test.expectedHostLink
-			if expectedHostLink == "" {
-				expectedHostLink = "host_link:pcie"
-			}
 			for metricName, expectedValue := range test.expectedMetricVals {
 				metric := findMetric(metricsOut, metricName)
 				require.NotNil(t, metric, "expected metric %s", metricName)
@@ -1034,11 +1028,7 @@ func TestPCIELinkMetrics(t *testing.T) {
 					// accept 1 where 0 is expected and make the flags untested.
 					require.Equal(t, expectedValue, metric.Value, "metric %s", metricName)
 				}
-				if strings.HasSuffix(metricName, ".degraded") {
-					require.Equal(t, []string{expectedHostLink}, metric.Tags(), "metric %s", metricName)
-				} else {
-					require.Empty(t, metric.Tags(), "metric %s", metricName)
-				}
+				require.Empty(t, metric.Tags(), "metric %s", metricName)
 			}
 		})
 	}

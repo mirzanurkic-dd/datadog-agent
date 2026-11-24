@@ -10,5 +10,4 @@ fixes:
   - |
     gpu: ``gpu.pci.link.{width,speed}.degraded`` no longer report a degraded PCIe link
     on GPUs attached to their host CPU over NVLink-C2C (Grace Hopper, Grace Blackwell),
-    where PCIe is a sideband that the driver negotiates down by design. Both metrics now
-    carry a ``host_link`` tag (``pcie`` or ``nvlink_c2c``).
+    where PCIe is a sideband that the driver negotiates down by design.

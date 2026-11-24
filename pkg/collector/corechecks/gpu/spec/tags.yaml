@@ -97,10 +97,6 @@ tags:
     regex: "^(multiple_single_bit|double_bit)$"
   vgpu_product:
     regex: "^(unknown|vgpu|nvidia_rtx|gaming|compute|unknown_\\d+)$"
-  host_link:
-    # How the GPU reaches its host CPU: nvlink_c2c on Grace Hopper and Grace
-    # Blackwell, where PCIe is only a sideband, pcie everywhere else.
-    regex: "^(pcie|nvlink_c2c)$"
   nvlink_port:
     regex: "^\\d+$"
   fan_index:
