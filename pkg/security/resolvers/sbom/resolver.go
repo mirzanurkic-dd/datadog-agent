@@ -709,6 +709,8 @@ func (r *Resolver) scanHost() error {
 		return err
 	}
 	kernelFiles := r.kernelFiles(hostRoot)
+	usrMerged := isUsrMerged(hostRoot)
+	data := newData(report, usrMerged)
 
 	r.hostSBOM.Lock()
 	rescan := r.hostSBOM.IsComputed()
@@ -723,8 +725,8 @@ func (r *Resolver) scanHost() error {
 	// scan of the core agent go out in full, and the hourly rescan of an
 	// unchanged host keeps its heartbeats.
 	changed := !rescan || !previous.holds(report)
-	r.hostSBOM.usrMerged = isUsrMerged(hostRoot)
-	r.hostSBOM.setReport(report)
+	r.hostSBOM.usrMerged = usrMerged
+	r.hostSBOM.data = data
 	r.hostSBOM.data.keepUsage(previous)
 	markRunningKernel(r.hostSBOM.data, kernelFiles)
 	r.hostSBOM.state.Store(computedState)
@@ -1548,7 +1550,7 @@ func (r *Resolver) lookup(pc *model.ProcessContext, file *model.FileEvent, usage
 	}
 
 	sbom := r.getSBOM(pc.ContainerContext.ContainerID)
-	if sbom == nil {
+	if sbom == nil || !sbom.IsComputed() {
 		return nil
 	}
 
@@ -1581,7 +1583,7 @@ func (r *Resolver) owner(sbom *SBOM, pid uint32, path string, usage bool) *sbomt
 // package stays as it is.
 func (r *Resolver) HostPackageVersion(path string) string {
 	sbom := r.getSBOM("")
-	if sbom == nil {
+	if sbom == nil || !sbom.IsComputed() {
 		return ""
 	}
 

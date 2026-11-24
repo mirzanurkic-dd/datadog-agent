@@ -3235,3 +3235,39 @@ func TestTriggerScanRetriesOnFullChan(t *testing.T) {
 		}
 	})
 }
+
+func TestLookupDoesNotBlockWhileSBOMScanning(t *testing.T) {
+	r, sbom := newScanQueueResolver(t)
+	r.hostSBOM = NewSBOM("", nil, "")
+	t.Cleanup(r.hostSBOM.stop)
+
+	sbom.Lock()
+	defer sbom.Unlock()
+
+	r.hostSBOM.state.Store(pendingState)
+	r.hostSBOM.Lock()
+	defer r.hostSBOM.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		pc := &model.ProcessContext{}
+		pc.ContainerContext.ContainerID = sbom.ContainerID
+		if pkg := r.LookupPackage(pc, &model.FileEvent{PathnameStr: "/usr/bin/bash", IsPathnameStrResolved: true}); pkg != nil {
+			t.Errorf("expected nil package while workload SBOM is scanning, got %+v", pkg)
+		}
+		if pkg := r.LookupPackage(&model.ProcessContext{}, &model.FileEvent{PathnameStr: "/usr/bin/bash", IsPathnameStrResolved: true}); pkg != nil {
+			t.Errorf("expected nil package while host SBOM is scanning, got %+v", pkg)
+		}
+		if v := r.HostPackageVersion("bash"); v != "" {
+			t.Errorf("expected empty version while host SBOM is scanning, got %q", v)
+		}
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("LookupPackage or HostPackageVersion blocked on SBOM write lock while state was pending")
+	}
+}
+
