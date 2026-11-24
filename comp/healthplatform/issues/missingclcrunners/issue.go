@@ -29,8 +29,8 @@ type MissingCLCRunnersIssue struct{}
 // Expected context keys:
 //   - "pending_checks": the number of cluster-check configs that cannot be dispatched
 func (t *MissingCLCRunnersIssue) BuildIssue(context map[string]string) (*healthplatform.Issue, error) {
-	description := "The Cluster Agent has cluster checks to dispatch but no Cluster Check Runners are reporting. " +
-		"Cluster checks are not being dispatched and their metrics may be lost."
+	description := "The Cluster Agent has cluster checks that cannot be dispatched because no Cluster Check Runner " +
+		"is available to run them. Those checks are not being executed and their metrics may be lost."
 
 	steps := []*healthplatform.RemediationStep{
 		{Order: 1, Text: "Verify the Cluster Check Runner pods are running and ready: kubectl get pods -l app=datadog-clusterchecks"},
