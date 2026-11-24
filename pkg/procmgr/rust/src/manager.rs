@@ -139,6 +139,21 @@ impl ProcessManager {
     /// Runs until `shutdown` resolves. Create `shutdown` before [`ProcessManager::new`] to keep
     /// a stop request that arrives while the catalog loads.
     pub async fn run_with_shutdown(&self, shutdown: impl Future<Output = ()>) -> Result<i32> {
+        tokio::pin!(shutdown);
+
+        // A stop that arrived while the catalog loaded returns before anything is bound or
+        // spawned. Poll once without waiting.
+        let stop_pending = tokio::select! {
+            biased;
+            _ = &mut shutdown => true,
+            _ = std::future::ready(()) => false,
+        };
+        if stop_pending {
+            self.shutting_down.store(true, Ordering::SeqCst);
+            info!("stop requested before startup, not starting processes");
+            return finish_run(None, 0).await;
+        }
+
         let _reaper = platform::start_reaper();
         let (cmd_tx, mut cmd_rx) = mpsc::channel::<Command>(64);
         let (grpc_shutdown_tx, grpc_shutdown_rx) = oneshot::channel::<()>();
@@ -148,10 +163,8 @@ impl ProcessManager {
         let (restart_tx, mut restart_rx) = mpsc::channel::<String>(256);
         self.start(&exit_tx).await;
 
-        tokio::pin!(shutdown);
-
         let mut external_shutdown = false;
-        loop {
+        while !external_shutdown {
             if self.supervisor_exit_code().is_some() {
                 break;
             }
@@ -209,19 +222,12 @@ impl ProcessManager {
         };
 
         self.shutdown().await;
-        // Children have stopped, so their staged copies can go. The path is the
-        // one directory this start created, never a glob of the volume.
-        platform::remove_startup_staging_dir();
-        if let Some(cleanup) = socket_cleanup {
-            cleanup.wait().await;
-        }
         let code = if external_shutdown {
             0
         } else {
             self.supervisor_exit_code().unwrap_or(0)
         };
-        info!("dd-procmgrd stopped (exit code {code})");
-        Ok(code)
+        finish_run(socket_cleanup, code).await
     }
 
     pub(crate) async fn processes(&self) -> tokio::sync::RwLockReadGuard<'_, Vec<ManagedProcess>> {
@@ -877,6 +883,21 @@ impl ProcessManager {
         }
         decided
     }
+}
+
+/// Final steps of a run, shared by the early stop and the normal teardown.
+async fn finish_run(
+    socket_cleanup: Option<crate::transport::SocketCleanup>,
+    code: i32,
+) -> Result<i32> {
+    // Children have stopped, so their staged copies can go. The path is the
+    // one directory this start created, never a glob of the volume.
+    platform::remove_startup_staging_dir();
+    if let Some(cleanup) = socket_cleanup {
+        cleanup.wait().await;
+    }
+    info!("dd-procmgrd stopped (exit code {code})");
+    Ok(code)
 }
 
 fn exit_code_of(status: &std::process::ExitStatus) -> i32 {

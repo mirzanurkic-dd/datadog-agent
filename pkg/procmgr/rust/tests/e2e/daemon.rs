@@ -137,6 +137,79 @@ fn test_cli_daemon_shutdown_during_startup_exits_cleanly() {
     assert_eq!(status.signal(), None, "daemon was killed by a signal");
 }
 
+/// A SIGTERM while the catalog loads must start nothing. A FIFO catalog entry blocks the loader.
+#[cfg(unix)]
+#[test]
+fn test_cli_daemon_shutdown_during_catalog_load_starts_nothing() {
+    use nix::sys::signal::Signal;
+    use std::os::unix::process::ExitStatusExt;
+
+    let env = TestEnv::new();
+    let blocked = env.config_dir().join("blocked.yaml");
+    let blocked_c = std::ffi::CString::new(blocked.to_str().expect("utf-8 path")).expect("no NUL");
+    assert_eq!(
+        unsafe { libc::mkfifo(blocked_c.as_ptr(), 0o600) },
+        0,
+        "mkfifo failed"
+    );
+
+    // The writer opens the FIFO, which returns once the loader opens it for reading. It then
+    // waits for the release, so the daemon is still inside ProcessManager::new when SIGTERM lands.
+    let (opened_tx, opened_rx) = std::sync::mpsc::channel::<()>();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let writer_path = blocked.clone();
+    let writer = std::thread::spawn(move || {
+        let mut writer = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&writer_path)
+            .expect("open catalog fifo for writing");
+        let _ = opened_tx.send(());
+        let _ = release_rx.recv();
+        std::io::Write::write_all(&mut writer, b"command: /usr/bin/true\nauto_start: true\n")
+            .expect("write catalog entry");
+    });
+
+    let socket = env.env_root().join("daemon.sock");
+    let mut daemon = DaemonHandle::start(env.config_dir(), &socket);
+    opened_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("daemon never opened the catalog fifo");
+
+    daemon.send_signal(Signal::SIGTERM);
+    // Give the signal time to reach the runtime before the loader returns.
+    std::thread::sleep(Duration::from_millis(200));
+    if let Some(status) = daemon.try_exit_status() {
+        panic!("daemon exited before the catalog was released: {status:?}");
+    }
+    let _ = release_tx.send(());
+    writer.join().expect("writer thread panicked");
+
+    let status = daemon
+        .wait_for_exit(Duration::from_secs(10))
+        .expect("daemon did not exit after SIGTERM during catalog load");
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "daemon should exit 0, got {status:?}"
+    );
+    assert_eq!(status.signal(), None, "daemon was killed by a signal");
+    // The reader threads may still hold the last lines after the exit, so wait for the final one.
+    assert!(
+        daemon.wait_for_log("dd-procmgrd stopped (exit code 0)", Duration::from_secs(10)),
+        "daemon did not log its final stop line"
+    );
+    assert_eq!(
+        daemon.count_log_matches("[blocked] spawned"),
+        0,
+        "a process started after a stop during catalog load"
+    );
+    assert_eq!(
+        daemon.count_log_matches("stop requested before startup"),
+        1,
+        "the pending stop should skip the start pass"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn test_cli_daemon_shutdown_via_sigint() {
