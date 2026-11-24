@@ -56,19 +56,45 @@ type programEntry struct {
 	deviceName string
 }
 
+type deviceKey struct {
+	ifIndex uint32
+	netNS   uint32
+}
+
 // Resolver defines a TC resolver
 type Resolver struct {
 	sync.RWMutex
-	config   *config.Config
-	programs map[ProgramKey]programEntry
+	config        *config.Config
+	programs      map[ProgramKey]programEntry
+	deviceNamesMu sync.RWMutex
+	deviceNames   map[deviceKey]string
 }
 
 // NewResolver returns a TC resolver
 func NewResolver(config *config.Config) *Resolver {
 	return &Resolver{
-		config:   config,
-		programs: make(map[ProgramKey]programEntry),
+		config:      config,
+		programs:    make(map[ProgramKey]programEntry),
+		deviceNames: make(map[deviceKey]string),
 	}
+}
+
+func (tcr *Resolver) setDeviceName(ifIndex, netNS uint32, name string) {
+	tcr.deviceNamesMu.Lock()
+	tcr.deviceNames[deviceKey{ifIndex: ifIndex, netNS: netNS}] = name
+	tcr.deviceNamesMu.Unlock()
+}
+
+func (tcr *Resolver) syncDeviceNameLocked(ifIndex, netNS uint32) {
+	for key, entry := range tcr.programs {
+		if key.IfIndex == ifIndex && key.NetNS == netNS {
+			tcr.setDeviceName(ifIndex, netNS, entry.deviceName)
+			return
+		}
+	}
+	tcr.deviceNamesMu.Lock()
+	delete(tcr.deviceNames, deviceKey{ifIndex: ifIndex, netNS: netNS})
+	tcr.deviceNamesMu.Unlock()
 }
 
 // SendTCProgramsStats sends TC programs stats
@@ -125,6 +151,7 @@ func (tcr *Resolver) SetupNewTCClassifierWithNetNSHandle(device model.NetDevice,
 			if entry.deviceName != device.Name {
 				entry.deviceName = device.Name
 				tcr.programs[progKey] = entry
+				tcr.setDeviceName(device.IfIndex, device.NetNS, device.Name)
 			}
 			continue
 		}
@@ -167,6 +194,7 @@ func (tcr *Resolver) SetupNewTCClassifierWithNetNSHandle(device model.NetDevice,
 			}
 
 			tcr.programs[progKey] = entry
+			tcr.setDeviceName(device.IfIndex, device.NetNS, device.Name)
 
 			// do not use dynamic program name here, it explodes cardinality
 			ddebpf.AddProgramNameMapping(entry.programID, entry.probe.EBPFFuncName, "cws")
@@ -202,6 +230,7 @@ func (tcr *Resolver) detachHook(tcKey ProgramKey, entry programEntry, m *manager
 	// TODO(yoanngh): fix this ebpf-manager/tc resolver desync
 	ddebpf.RemoveProgramID(entry.programID, "cws")
 	delete(tcr.programs, tcKey)
+	tcr.syncDeviceNameLocked(tcKey.IfIndex, tcKey.NetNS)
 }
 
 // FlushNetworkNamespaceID flushes network ID
@@ -247,14 +276,8 @@ func (tcr *Resolver) FlushInactiveProbes(m *manager.Manager, isLazy func(string)
 
 // ResolveNetworkDeviceIfName resolves network device name
 func (tcr *Resolver) ResolveNetworkDeviceIfName(ifIndex, netNS uint32) (string, bool) {
-	tcr.RLock()
-	defer tcr.RUnlock()
-
-	for key, entry := range tcr.programs {
-		if key.IfIndex == ifIndex && key.NetNS == netNS {
-			return entry.deviceName, true
-		}
-	}
-
-	return "", false
+	tcr.deviceNamesMu.RLock()
+	name, ok := tcr.deviceNames[deviceKey{ifIndex: ifIndex, netNS: netNS}]
+	tcr.deviceNamesMu.RUnlock()
+	return name, ok
 }
