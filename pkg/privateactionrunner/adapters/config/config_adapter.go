@@ -27,6 +27,7 @@ type Config struct {
 	DomainAllowlist                    []string
 	AllowIMDSEndpoint                  bool
 	KubernetesAllowedCustomResources   []string
+	KubernetesRedactSensitiveValues    bool
 	RShellAllowedPaths                 []string
 	RShellAllowedCommands              []string
 	RShellAllowedSystemServices        map[string][]string

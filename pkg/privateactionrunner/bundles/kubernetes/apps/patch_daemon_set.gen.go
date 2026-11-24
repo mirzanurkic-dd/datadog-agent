@@ -19,10 +19,12 @@ import (
 	typesv1 "k8s.io/apimachinery/pkg/types"
 )
 
-type PatchDaemonSetHandler struct{}
+type PatchDaemonSetHandler struct {
+	redactSensitiveValues bool
+}
 
-func NewPatchDaemonSetHandler() *PatchDaemonSetHandler {
-	return &PatchDaemonSetHandler{}
+func NewPatchDaemonSetHandler(redactSensitiveValues bool) *PatchDaemonSetHandler {
+	return &PatchDaemonSetHandler{redactSensitiveValues: redactSensitiveValues}
 }
 
 type PatchDaemonSetInputs struct {
@@ -68,6 +70,10 @@ func (h *PatchDaemonSetHandler) Run(
 	response, err := client.AppsV1().DaemonSets(inputs.Namespace).Patch(ctx, inputs.Name, typesv1.JSONPatchType, body, support.MetaPatch(inputs.PatchFields))
 	if err != nil {
 		return nil, err
+	}
+
+	if h.redactSensitiveValues {
+		support.RedactDaemonSet(response)
 	}
 
 	return &PatchDaemonSetOutputs{

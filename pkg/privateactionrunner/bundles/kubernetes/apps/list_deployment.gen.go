@@ -16,10 +16,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-type ListDeploymentHandler struct{}
+type ListDeploymentHandler struct {
+	redactSensitiveValues bool
+}
 
-func NewListDeploymentHandler() *ListDeploymentHandler {
-	return &ListDeploymentHandler{}
+func NewListDeploymentHandler(redactSensitiveValues bool) *ListDeploymentHandler {
+	return &ListDeploymentHandler{redactSensitiveValues: redactSensitiveValues}
 }
 
 type ListDeploymentInputs struct {
@@ -50,6 +52,12 @@ func (h *ListDeploymentHandler) Run(
 	response, err := client.AppsV1().Deployments(inputs.Namespace).List(ctx, support.MetaList(inputs.ListFields))
 	if err != nil {
 		return nil, err
+	}
+
+	if h.redactSensitiveValues {
+		for i := range response.Items {
+			support.RedactDeployment(&response.Items[i])
+		}
 	}
 
 	return &ListDeploymentOutputs{

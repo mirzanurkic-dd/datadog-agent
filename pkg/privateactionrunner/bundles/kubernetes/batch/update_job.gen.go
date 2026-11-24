@@ -17,10 +17,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-type UpdateJobHandler struct{}
+type UpdateJobHandler struct {
+	redactSensitiveValues bool
+}
 
-func NewUpdateJobHandler() *UpdateJobHandler {
-	return &UpdateJobHandler{}
+func NewUpdateJobHandler(redactSensitiveValues bool) *UpdateJobHandler {
+	return &UpdateJobHandler{redactSensitiveValues: redactSensitiveValues}
 }
 
 type UpdateJobInputs struct {
@@ -60,6 +62,10 @@ func (h *UpdateJobHandler) Run(
 	response, err := client.BatchV1().Jobs(inputs.Namespace).Update(ctx, inputs.Body, support.MetaUpdate(inputs.UpdateFields))
 	if err != nil {
 		return nil, err
+	}
+
+	if h.redactSensitiveValues {
+		support.RedactJob(response)
 	}
 
 	return &UpdateJobOutputs{

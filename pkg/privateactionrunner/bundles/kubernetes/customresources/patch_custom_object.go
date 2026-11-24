@@ -16,10 +16,13 @@ import (
 	"github.com/DataDog/datadog-agent/pkg/privateactionrunner/types"
 )
 
-type PatchCustomObjectHandler struct{ policy resourcePolicy }
+type PatchCustomObjectHandler struct {
+	policy                resourcePolicy
+	redactSensitiveValues bool
+}
 
-func NewPatchCustomObjectHandler(policy resourcePolicy) *PatchCustomObjectHandler {
-	return &PatchCustomObjectHandler{policy: policy}
+func NewPatchCustomObjectHandler(policy resourcePolicy, redactSensitiveValues bool) *PatchCustomObjectHandler {
+	return &PatchCustomObjectHandler{policy: policy, redactSensitiveValues: redactSensitiveValues}
 }
 
 type PatchCustomObjectInputs struct {
@@ -60,6 +63,10 @@ func (h *PatchCustomObjectHandler) Run(
 	resp, err := client.Resource(gvr).Namespace(inputs.Namespace).Patch(ctx, inputs.Name, typesv1.JSONPatchType, body, support.MetaPatch(inputs.PatchFields))
 	if err != nil {
 		return nil, err
+	}
+
+	if h.redactSensitiveValues {
+		support.RedactUnstructured(resp.Object)
 	}
 
 	return resp.Object, nil

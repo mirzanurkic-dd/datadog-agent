@@ -7,6 +7,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/format"
@@ -44,6 +45,11 @@ func generateBundle(sdkRoot, target, source string, cfg targetConfig) (map[strin
 				}
 				return true
 			})
+		}
+	}
+	for _, name := range cfg.RedactedResources {
+		if !slices.Contains(cfg.Resources, name) {
+			return nil, fmt.Errorf("redacted resource %s is not in resources", name)
 		}
 	}
 	var actions []action
@@ -94,7 +100,7 @@ func generateBundle(sdkRoot, target, source string, cfg targetConfig) (map[strin
 	}
 	files := map[string][]byte{}
 	for _, a := range actions {
-		if slices.Contains(manual, a.Name) {
+		if slices.ContainsFunc(manual, func(m manualAction) bool { return m.Name == a.Name }) {
 			return nil, fmt.Errorf("action %s is both handwritten and generated", a.Name)
 		}
 		filename := snake(a.Name) + ".gen.go"
@@ -166,6 +172,8 @@ func methodAction(method, target string, cfg targetConfig, res resource) (action
 		CopyrightYear: cfg.CopyrightYear, Resource: res, SDKMethod: method,
 		SDKMethodArgs: args, RequiredImports: required, StandardImports: standard,
 		NamespaceRequired: namespaceRequired,
+		RedactsSensitiveValues: slices.Contains(cfg.RedactedResources, res.Name) &&
+			!slices.Contains([]string{"Delete", "DeleteCollection"}, method),
 	}, true
 }
 
@@ -276,12 +284,12 @@ func qualifyType(expr ast.Expr, apiPath string, imports map[string]string) (stri
 	return fullType, required, err
 }
 
-func manualActions(dir string) ([]string, error) {
+func manualActions(dir string) ([]manualAction, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
 	}
-	var names []string
+	var actions []manualAction
 	for _, entry := range entries {
 		name := entry.Name()
 		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, ".gen.go") || strings.HasSuffix(name, "_test.go") {
@@ -302,12 +310,32 @@ func manualActions(dir string) ([]string, error) {
 				continue
 			}
 			actionName = strings.ToLower(actionName[:1]) + actionName[1:]
-			if slices.Contains(names, actionName) {
+			if slices.ContainsFunc(actions, func(a manualAction) bool { return a.Name == actionName }) {
 				return nil, fmt.Errorf("duplicate manual action %s", actionName)
 			}
-			names = append(names, actionName)
+			redacts, err := takesRedactionSetting(fn)
+			if err != nil {
+				return nil, fmt.Errorf("manual action %s: %w", actionName, err)
+			}
+			actions = append(actions, manualAction{Name: actionName, RedactsSensitiveValues: redacts})
 		}
 	}
-	slices.Sort(names)
-	return names, nil
+	slices.SortFunc(actions, func(a, b manualAction) int { return strings.Compare(a.Name, b.Name) })
+	return actions, nil
+}
+
+// takesRedactionSetting reports whether a manual action constructor is declared
+// as New<Action>Handler(redactSensitiveValues bool). Constructors take no other
+// parameters, since the entrypoint has nothing else to pass them.
+func takesRedactionSetting(constructor *ast.FuncDecl) (bool, error) {
+	params := constructor.Type.Params.List
+	if len(params) == 0 {
+		return false, nil
+	}
+	if len(params) == 1 && len(params[0].Names) == 1 && params[0].Names[0].Name == "redactSensitiveValues" {
+		if ident, ok := params[0].Type.(*ast.Ident); ok && ident.Name == "bool" {
+			return true, nil
+		}
+	}
+	return false, errors.New("constructor must take no parameters or (redactSensitiveValues bool)")
 }

@@ -17,10 +17,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-type GetDaemonSetHandler struct{}
+type GetDaemonSetHandler struct {
+	redactSensitiveValues bool
+}
 
-func NewGetDaemonSetHandler() *GetDaemonSetHandler {
-	return &GetDaemonSetHandler{}
+func NewGetDaemonSetHandler(redactSensitiveValues bool) *GetDaemonSetHandler {
+	return &GetDaemonSetHandler{redactSensitiveValues: redactSensitiveValues}
 }
 
 type GetDaemonSetInputs struct {
@@ -59,6 +61,10 @@ func (h *GetDaemonSetHandler) Run(
 	response, err := client.AppsV1().DaemonSets(inputs.Namespace).Get(ctx, inputs.Name, support.MetaGet(inputs.GetFields))
 	if err != nil {
 		return nil, err
+	}
+
+	if h.redactSensitiveValues {
+		support.RedactDaemonSet(response)
 	}
 
 	return &GetDaemonSetOutputs{

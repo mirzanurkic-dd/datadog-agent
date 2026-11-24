@@ -19,10 +19,12 @@ import (
 	typesv1 "k8s.io/apimachinery/pkg/types"
 )
 
-type PatchReplicaSetHandler struct{}
+type PatchReplicaSetHandler struct {
+	redactSensitiveValues bool
+}
 
-func NewPatchReplicaSetHandler() *PatchReplicaSetHandler {
-	return &PatchReplicaSetHandler{}
+func NewPatchReplicaSetHandler(redactSensitiveValues bool) *PatchReplicaSetHandler {
+	return &PatchReplicaSetHandler{redactSensitiveValues: redactSensitiveValues}
 }
 
 type PatchReplicaSetInputs struct {
@@ -68,6 +70,10 @@ func (h *PatchReplicaSetHandler) Run(
 	response, err := client.AppsV1().ReplicaSets(inputs.Namespace).Patch(ctx, inputs.Name, typesv1.JSONPatchType, body, support.MetaPatch(inputs.PatchFields))
 	if err != nil {
 		return nil, err
+	}
+
+	if h.redactSensitiveValues {
+		support.RedactReplicaSet(response)
 	}
 
 	return &PatchReplicaSetOutputs{

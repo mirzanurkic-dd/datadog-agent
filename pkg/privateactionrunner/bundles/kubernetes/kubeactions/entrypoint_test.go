@@ -19,7 +19,7 @@ import (
 func TestGetAction(t *testing.T) {
 	// A nil component is fine here: GetAction only looks up handlers, it does
 	// not invoke them.
-	b := NewKubernetesKubeActions(nil)
+	b := NewKubernetesKubeActions(nil, true)
 
 	for _, name := range []string{
 		kubeactions.ActionNameDeletePod,

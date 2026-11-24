@@ -16,10 +16,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-type ListPodHandler struct{}
+type ListPodHandler struct {
+	redactSensitiveValues bool
+}
 
-func NewListPodHandler() *ListPodHandler {
-	return &ListPodHandler{}
+func NewListPodHandler(redactSensitiveValues bool) *ListPodHandler {
+	return &ListPodHandler{redactSensitiveValues: redactSensitiveValues}
 }
 
 type ListPodInputs struct {
@@ -50,6 +52,12 @@ func (h *ListPodHandler) Run(
 	response, err := client.CoreV1().Pods(inputs.Namespace).List(ctx, support.MetaList(inputs.ListFields))
 	if err != nil {
 		return nil, err
+	}
+
+	if h.redactSensitiveValues {
+		for i := range response.Items {
+			support.RedactPod(&response.Items[i])
+		}
 	}
 
 	return &ListPodOutputs{

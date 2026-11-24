@@ -19,10 +19,12 @@ import (
 	typesv1 "k8s.io/apimachinery/pkg/types"
 )
 
-type PatchCronJobHandler struct{}
+type PatchCronJobHandler struct {
+	redactSensitiveValues bool
+}
 
-func NewPatchCronJobHandler() *PatchCronJobHandler {
-	return &PatchCronJobHandler{}
+func NewPatchCronJobHandler(redactSensitiveValues bool) *PatchCronJobHandler {
+	return &PatchCronJobHandler{redactSensitiveValues: redactSensitiveValues}
 }
 
 type PatchCronJobInputs struct {
@@ -68,6 +70,10 @@ func (h *PatchCronJobHandler) Run(
 	response, err := client.BatchV1().CronJobs(inputs.Namespace).Patch(ctx, inputs.Name, typesv1.JSONPatchType, body, support.MetaPatch(inputs.PatchFields))
 	if err != nil {
 		return nil, err
+	}
+
+	if h.redactSensitiveValues {
+		support.RedactCronJob(response)
 	}
 
 	return &PatchCronJobOutputs{

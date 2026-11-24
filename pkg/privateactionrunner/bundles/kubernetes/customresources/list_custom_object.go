@@ -14,10 +14,13 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
-type ListCustomObjectHandler struct{ policy resourcePolicy }
+type ListCustomObjectHandler struct {
+	policy                resourcePolicy
+	redactSensitiveValues bool
+}
 
-func NewListCustomObjectHandler(policy resourcePolicy) *ListCustomObjectHandler {
-	return &ListCustomObjectHandler{policy: policy}
+func NewListCustomObjectHandler(policy resourcePolicy, redactSensitiveValues bool) *ListCustomObjectHandler {
+	return &ListCustomObjectHandler{policy: policy, redactSensitiveValues: redactSensitiveValues}
 }
 
 type ListCustomObjectInputs struct {
@@ -56,6 +59,12 @@ func (h *ListCustomObjectHandler) Run(
 	resp, err := client.Resource(gvr).Namespace(inputs.Namespace).List(ctx, support.MetaList(inputs.ListFields))
 	if err != nil {
 		return nil, err
+	}
+
+	if h.redactSensitiveValues {
+		for i := range resp.Items {
+			support.RedactUnstructured(resp.Items[i].Object)
+		}
 	}
 
 	return &ListCustomObjectOutputs{

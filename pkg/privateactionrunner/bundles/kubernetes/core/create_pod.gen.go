@@ -17,10 +17,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-type CreatePodHandler struct{}
+type CreatePodHandler struct {
+	redactSensitiveValues bool
+}
 
-func NewCreatePodHandler() *CreatePodHandler {
-	return &CreatePodHandler{}
+func NewCreatePodHandler(redactSensitiveValues bool) *CreatePodHandler {
+	return &CreatePodHandler{redactSensitiveValues: redactSensitiveValues}
 }
 
 type CreatePodInputs struct {
@@ -60,6 +62,10 @@ func (h *CreatePodHandler) Run(
 	response, err := client.CoreV1().Pods(inputs.Namespace).Create(ctx, inputs.Body, support.MetaCreate(inputs.CreateFields))
 	if err != nil {
 		return nil, err
+	}
+
+	if h.redactSensitiveValues {
+		support.RedactPod(response)
 	}
 
 	return &CreatePodOutputs{

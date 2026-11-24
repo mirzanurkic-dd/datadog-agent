@@ -17,10 +17,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-type UpdateStatefulSetHandler struct{}
+type UpdateStatefulSetHandler struct {
+	redactSensitiveValues bool
+}
 
-func NewUpdateStatefulSetHandler() *UpdateStatefulSetHandler {
-	return &UpdateStatefulSetHandler{}
+func NewUpdateStatefulSetHandler(redactSensitiveValues bool) *UpdateStatefulSetHandler {
+	return &UpdateStatefulSetHandler{redactSensitiveValues: redactSensitiveValues}
 }
 
 type UpdateStatefulSetInputs struct {
@@ -60,6 +62,10 @@ func (h *UpdateStatefulSetHandler) Run(
 	response, err := client.AppsV1().StatefulSets(inputs.Namespace).Update(ctx, inputs.Body, support.MetaUpdate(inputs.UpdateFields))
 	if err != nil {
 		return nil, err
+	}
+
+	if h.redactSensitiveValues {
+		support.RedactStatefulSet(response)
 	}
 
 	return &UpdateStatefulSetOutputs{

@@ -264,6 +264,23 @@ func TestFromDDConfigKubernetesAllowedCustomResources(t *testing.T) {
 	})
 }
 
+func TestFromDDConfigKubernetesRedactSensitiveValues(t *testing.T) {
+	t.Run("enabled by default", func(t *testing.T) {
+		mockConfig := configmock.New(t)
+		cfg, err := FromDDConfig(mockConfig, nil)
+		require.NoError(t, err)
+		assert.True(t, cfg.KubernetesRedactSensitiveValues)
+	})
+
+	t.Run("can be disabled", func(t *testing.T) {
+		mockConfig := configmock.New(t)
+		mockConfig.SetInTest(par.KubernetesRedactSensitiveValues, false)
+		cfg, err := FromDDConfig(mockConfig, nil)
+		require.NoError(t, err)
+		assert.False(t, cfg.KubernetesRedactSensitiveValues)
+	})
+}
+
 func TestFromDDConfigMetricsClient(t *testing.T) {
 	providedClient := &statsd.NoOpClient{}
 	tests := []struct {

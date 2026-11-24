@@ -19,10 +19,12 @@ import (
 	typesv1 "k8s.io/apimachinery/pkg/types"
 )
 
-type PatchControllerRevisionHandler struct{}
+type PatchControllerRevisionHandler struct {
+	redactSensitiveValues bool
+}
 
-func NewPatchControllerRevisionHandler() *PatchControllerRevisionHandler {
-	return &PatchControllerRevisionHandler{}
+func NewPatchControllerRevisionHandler(redactSensitiveValues bool) *PatchControllerRevisionHandler {
+	return &PatchControllerRevisionHandler{redactSensitiveValues: redactSensitiveValues}
 }
 
 type PatchControllerRevisionInputs struct {
@@ -68,6 +70,10 @@ func (h *PatchControllerRevisionHandler) Run(
 	response, err := client.AppsV1().ControllerRevisions(inputs.Namespace).Patch(ctx, inputs.Name, typesv1.JSONPatchType, body, support.MetaPatch(inputs.PatchFields))
 	if err != nil {
 		return nil, err
+	}
+
+	if h.redactSensitiveValues {
+		support.RedactControllerRevision(response)
 	}
 
 	return &PatchControllerRevisionOutputs{

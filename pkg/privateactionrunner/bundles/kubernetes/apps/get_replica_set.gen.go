@@ -17,10 +17,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-type GetReplicaSetHandler struct{}
+type GetReplicaSetHandler struct {
+	redactSensitiveValues bool
+}
 
-func NewGetReplicaSetHandler() *GetReplicaSetHandler {
-	return &GetReplicaSetHandler{}
+func NewGetReplicaSetHandler(redactSensitiveValues bool) *GetReplicaSetHandler {
+	return &GetReplicaSetHandler{redactSensitiveValues: redactSensitiveValues}
 }
 
 type GetReplicaSetInputs struct {
@@ -59,6 +61,10 @@ func (h *GetReplicaSetHandler) Run(
 	response, err := client.AppsV1().ReplicaSets(inputs.Namespace).Get(ctx, inputs.Name, support.MetaGet(inputs.GetFields))
 	if err != nil {
 		return nil, err
+	}
+
+	if h.redactSensitiveValues {
+		support.RedactReplicaSet(response)
 	}
 
 	return &GetReplicaSetOutputs{

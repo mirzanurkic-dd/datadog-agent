@@ -16,10 +16,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-type ListReplicationControllerHandler struct{}
+type ListReplicationControllerHandler struct {
+	redactSensitiveValues bool
+}
 
-func NewListReplicationControllerHandler() *ListReplicationControllerHandler {
-	return &ListReplicationControllerHandler{}
+func NewListReplicationControllerHandler(redactSensitiveValues bool) *ListReplicationControllerHandler {
+	return &ListReplicationControllerHandler{redactSensitiveValues: redactSensitiveValues}
 }
 
 type ListReplicationControllerInputs struct {
@@ -50,6 +52,12 @@ func (h *ListReplicationControllerHandler) Run(
 	response, err := client.CoreV1().ReplicationControllers(inputs.Namespace).List(ctx, support.MetaList(inputs.ListFields))
 	if err != nil {
 		return nil, err
+	}
+
+	if h.redactSensitiveValues {
+		for i := range response.Items {
+			support.RedactReplicationController(&response.Items[i])
+		}
 	}
 
 	return &ListReplicationControllerOutputs{

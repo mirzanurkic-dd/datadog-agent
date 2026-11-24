@@ -19,10 +19,12 @@ import (
 	typesv1 "k8s.io/apimachinery/pkg/types"
 )
 
-type PatchJobHandler struct{}
+type PatchJobHandler struct {
+	redactSensitiveValues bool
+}
 
-func NewPatchJobHandler() *PatchJobHandler {
-	return &PatchJobHandler{}
+func NewPatchJobHandler(redactSensitiveValues bool) *PatchJobHandler {
+	return &PatchJobHandler{redactSensitiveValues: redactSensitiveValues}
 }
 
 type PatchJobInputs struct {
@@ -68,6 +70,10 @@ func (h *PatchJobHandler) Run(
 	response, err := client.BatchV1().Jobs(inputs.Namespace).Patch(ctx, inputs.Name, typesv1.JSONPatchType, body, support.MetaPatch(inputs.PatchFields))
 	if err != nil {
 		return nil, err
+	}
+
+	if h.redactSensitiveValues {
+		support.RedactJob(response)
 	}
 
 	return &PatchJobOutputs{

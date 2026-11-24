@@ -14,10 +14,13 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
-type UpdateCustomObjectHandler struct{ policy resourcePolicy }
+type UpdateCustomObjectHandler struct {
+	policy                resourcePolicy
+	redactSensitiveValues bool
+}
 
-func NewUpdateCustomObjectHandler(policy resourcePolicy) *UpdateCustomObjectHandler {
-	return &UpdateCustomObjectHandler{policy: policy}
+func NewUpdateCustomObjectHandler(policy resourcePolicy, redactSensitiveValues bool) *UpdateCustomObjectHandler {
+	return &UpdateCustomObjectHandler{policy: policy, redactSensitiveValues: redactSensitiveValues}
 }
 
 type UpdateCustomObjectInputs struct {
@@ -54,6 +57,10 @@ func (h *UpdateCustomObjectHandler) Run(
 	resp, err := client.Resource(gvr).Namespace(inputs.Namespace).Update(ctx, &unstructured.Unstructured{Object: inputs.Body}, support.MetaUpdate(inputs.UpdateFields))
 	if err != nil {
 		return nil, err
+	}
+
+	if h.redactSensitiveValues {
+		support.RedactUnstructured(resp.Object)
 	}
 
 	return resp.Object, nil

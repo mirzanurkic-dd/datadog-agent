@@ -25,7 +25,7 @@ type KubernetesKubeActions struct {
 
 // NewKubernetesKubeActions builds the bundle, wiring each action to a handler
 // that reports lifecycle events through the kubeactions component.
-func NewKubernetesKubeActions(ka kubeactions.Component) *KubernetesKubeActions {
+func NewKubernetesKubeActions(ka kubeactions.Component, redactSensitiveValues bool) *KubernetesKubeActions {
 	return &KubernetesKubeActions{
 		actions: map[string]types.Action{
 			kubeactions.ActionNameDeletePod:          NewDeletePodHandler(ka),
@@ -34,7 +34,7 @@ func NewKubernetesKubeActions(ka kubeactions.Component) *KubernetesKubeActions {
 			kubeactions.ActionNamePatchDaemonSet:     NewPatchDaemonSetHandler(ka),
 			kubeactions.ActionNamePatchStatefulSet:   NewPatchStatefulSetHandler(ka),
 			kubeactions.ActionNameRollbackDeployment: NewRollbackDeploymentHandler(ka),
-			kubeactions.ActionNameGetResource:        NewGetResourceHandler(ka),
+			kubeactions.ActionNameGetResource:        NewGetResourceHandler(ka, redactSensitiveValues),
 		},
 	}
 }

@@ -19,10 +19,12 @@ import (
 	"github.com/DataDog/datadog-agent/pkg/privateactionrunner/types"
 )
 
-type RestartDeploymentHandler struct{}
+type RestartDeploymentHandler struct {
+	redactSensitiveValues bool
+}
 
-func NewRestartDeploymentHandler() *RestartDeploymentHandler {
-	return &RestartDeploymentHandler{}
+func NewRestartDeploymentHandler(redactSensitiveValues bool) *RestartDeploymentHandler {
+	return &RestartDeploymentHandler{redactSensitiveValues: redactSensitiveValues}
 }
 
 type RestartDeploymentInputs struct {
@@ -72,6 +74,10 @@ func (h *RestartDeploymentHandler) Run(
 	response, err := client.AppsV1().Deployments(inputs.Namespace).Patch(ctx, inputs.Name, typesv1.MergePatchType, body, metav1.PatchOptions{})
 	if err != nil {
 		return nil, err
+	}
+
+	if h.redactSensitiveValues {
+		support.RedactDeployment(response)
 	}
 
 	return &RestartDeploymentOutputs{

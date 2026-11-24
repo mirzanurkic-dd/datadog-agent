@@ -17,10 +17,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-type UpdateDeploymentHandler struct{}
+type UpdateDeploymentHandler struct {
+	redactSensitiveValues bool
+}
 
-func NewUpdateDeploymentHandler() *UpdateDeploymentHandler {
-	return &UpdateDeploymentHandler{}
+func NewUpdateDeploymentHandler(redactSensitiveValues bool) *UpdateDeploymentHandler {
+	return &UpdateDeploymentHandler{redactSensitiveValues: redactSensitiveValues}
 }
 
 type UpdateDeploymentInputs struct {
@@ -60,6 +62,10 @@ func (h *UpdateDeploymentHandler) Run(
 	response, err := client.AppsV1().Deployments(inputs.Namespace).Update(ctx, inputs.Body, support.MetaUpdate(inputs.UpdateFields))
 	if err != nil {
 		return nil, err
+	}
+
+	if h.redactSensitiveValues {
+		support.RedactDeployment(response)
 	}
 
 	return &UpdateDeploymentOutputs{

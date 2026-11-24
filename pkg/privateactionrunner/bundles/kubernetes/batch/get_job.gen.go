@@ -17,10 +17,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-type GetJobHandler struct{}
+type GetJobHandler struct {
+	redactSensitiveValues bool
+}
 
-func NewGetJobHandler() *GetJobHandler {
-	return &GetJobHandler{}
+func NewGetJobHandler(redactSensitiveValues bool) *GetJobHandler {
+	return &GetJobHandler{redactSensitiveValues: redactSensitiveValues}
 }
 
 type GetJobInputs struct {
@@ -59,6 +61,10 @@ func (h *GetJobHandler) Run(
 	response, err := client.BatchV1().Jobs(inputs.Namespace).Get(ctx, inputs.Name, support.MetaGet(inputs.GetFields))
 	if err != nil {
 		return nil, err
+	}
+
+	if h.redactSensitiveValues {
+		support.RedactJob(response)
 	}
 
 	return &GetJobOutputs{

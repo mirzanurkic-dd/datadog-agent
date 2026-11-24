@@ -23,11 +23,12 @@ import (
 )
 
 type ScaleStatefulSetVerticallyHandler struct {
-	c kubernetes.Interface
+	redactSensitiveValues bool
+	c                     kubernetes.Interface
 }
 
-func NewScaleStatefulSetVerticallyHandler() *ScaleStatefulSetVerticallyHandler {
-	return &ScaleStatefulSetVerticallyHandler{}
+func NewScaleStatefulSetVerticallyHandler(redactSensitiveValues bool) *ScaleStatefulSetVerticallyHandler {
+	return &ScaleStatefulSetVerticallyHandler{redactSensitiveValues: redactSensitiveValues}
 }
 
 type ScaleStatefulSetVerticallyInputs struct {
@@ -164,6 +165,10 @@ func (h *ScaleStatefulSetVerticallyHandler) Run(
 	response, err := client.AppsV1().StatefulSets(inputs.Namespace).Patch(ctx, inputs.Name, typesv1.StrategicMergePatchType, body, metav1.PatchOptions{})
 	if err != nil {
 		return nil, err
+	}
+
+	if h.redactSensitiveValues {
+		support.RedactStatefulSet(response)
 	}
 
 	return &ScaleStatefulSetVerticallyOutputs{

@@ -17,10 +17,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-type CreateReplicationControllerHandler struct{}
+type CreateReplicationControllerHandler struct {
+	redactSensitiveValues bool
+}
 
-func NewCreateReplicationControllerHandler() *CreateReplicationControllerHandler {
-	return &CreateReplicationControllerHandler{}
+func NewCreateReplicationControllerHandler(redactSensitiveValues bool) *CreateReplicationControllerHandler {
+	return &CreateReplicationControllerHandler{redactSensitiveValues: redactSensitiveValues}
 }
 
 type CreateReplicationControllerInputs struct {
@@ -60,6 +62,10 @@ func (h *CreateReplicationControllerHandler) Run(
 	response, err := client.CoreV1().ReplicationControllers(inputs.Namespace).Create(ctx, inputs.Body, support.MetaCreate(inputs.CreateFields))
 	if err != nil {
 		return nil, err
+	}
+
+	if h.redactSensitiveValues {
+		support.RedactReplicationController(response)
 	}
 
 	return &CreateReplicationControllerOutputs{

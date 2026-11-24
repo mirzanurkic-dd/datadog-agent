@@ -20,11 +20,12 @@ import (
 )
 
 type ScaleStatefulSetHorizontallyHandler struct {
-	c kubernetes.Interface
+	redactSensitiveValues bool
+	c                     kubernetes.Interface
 }
 
-func NewScaleStatefulSetHorizontallyHandler() *ScaleStatefulSetHorizontallyHandler {
-	return &ScaleStatefulSetHorizontallyHandler{}
+func NewScaleStatefulSetHorizontallyHandler(redactSensitiveValues bool) *ScaleStatefulSetHorizontallyHandler {
+	return &ScaleStatefulSetHorizontallyHandler{redactSensitiveValues: redactSensitiveValues}
 }
 
 type ScaleStatefulSetHorizontallyInputs struct {
@@ -66,6 +67,10 @@ func (h *ScaleStatefulSetHorizontallyHandler) Run(
 	response, err := client.AppsV1().StatefulSets(inputs.Namespace).Patch(ctx, inputs.Name, typesv1.MergePatchType, body, metav1.PatchOptions{})
 	if err != nil {
 		return nil, err
+	}
+
+	if h.redactSensitiveValues {
+		support.RedactStatefulSet(response)
 	}
 
 	return &ScaleStatefulSetHorizontallyOutputs{

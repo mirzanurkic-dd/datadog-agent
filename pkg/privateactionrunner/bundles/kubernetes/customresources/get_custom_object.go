@@ -13,10 +13,13 @@ import (
 	"github.com/DataDog/datadog-agent/pkg/privateactionrunner/types"
 )
 
-type GetCustomObjectHandler struct{ policy resourcePolicy }
+type GetCustomObjectHandler struct {
+	policy                resourcePolicy
+	redactSensitiveValues bool
+}
 
-func NewGetCustomObjectHandler(policy resourcePolicy) *GetCustomObjectHandler {
-	return &GetCustomObjectHandler{policy: policy}
+func NewGetCustomObjectHandler(policy resourcePolicy, redactSensitiveValues bool) *GetCustomObjectHandler {
+	return &GetCustomObjectHandler{policy: policy, redactSensitiveValues: redactSensitiveValues}
 }
 
 type GetCustomObjectInputs struct {
@@ -52,6 +55,10 @@ func (h *GetCustomObjectHandler) Run(
 	resp, err := client.Resource(gvr).Namespace(inputs.Namespace).Get(ctx, inputs.Name, support.MetaGet(inputs.GetFields))
 	if err != nil {
 		return nil, err
+	}
+
+	if h.redactSensitiveValues {
+		support.RedactUnstructured(resp.Object)
 	}
 
 	return resp.Object, nil

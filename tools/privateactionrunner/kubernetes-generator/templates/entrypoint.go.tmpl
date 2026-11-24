@@ -11,16 +11,16 @@ type Kubernetes{{ .Package | title }} struct {
     actions map[string]types.Action
 }
 
-func NewKubernetes{{ .Package | title }}() *Kubernetes{{ .Package | title }} {
+func NewKubernetes{{ .Package | title }}({{ if .RedactsSensitiveValues }}redactSensitiveValues bool{{ end }}) *Kubernetes{{ .Package | title }} {
     return &Kubernetes{{ .Package | title }}{
         actions: map[string]types.Action{
             // Manual actions
-            {{ range .ManualActionNames -}}
-            "{{ . }}": New{{ . | title }}Handler(),
+            {{ range .ManualActions -}}
+            "{{ .Name }}": New{{ .Name | title }}Handler({{ if .RedactsSensitiveValues }}redactSensitiveValues{{ end }}),
             {{ end -}}
             // Auto-generated actions
             {{ range .Actions -}}
-            "{{ .Name }}": New{{ .Name | title }}Handler(),
+            "{{ .Name }}": New{{ .Name | title }}Handler({{ if .RedactsSensitiveValues }}redactSensitiveValues{{ end }}),
             {{ end -}}
         },
     }

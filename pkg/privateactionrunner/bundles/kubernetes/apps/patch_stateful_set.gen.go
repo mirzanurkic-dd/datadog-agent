@@ -19,10 +19,12 @@ import (
 	typesv1 "k8s.io/apimachinery/pkg/types"
 )
 
-type PatchStatefulSetHandler struct{}
+type PatchStatefulSetHandler struct {
+	redactSensitiveValues bool
+}
 
-func NewPatchStatefulSetHandler() *PatchStatefulSetHandler {
-	return &PatchStatefulSetHandler{}
+func NewPatchStatefulSetHandler(redactSensitiveValues bool) *PatchStatefulSetHandler {
+	return &PatchStatefulSetHandler{redactSensitiveValues: redactSensitiveValues}
 }
 
 type PatchStatefulSetInputs struct {
@@ -68,6 +70,10 @@ func (h *PatchStatefulSetHandler) Run(
 	response, err := client.AppsV1().StatefulSets(inputs.Namespace).Patch(ctx, inputs.Name, typesv1.JSONPatchType, body, support.MetaPatch(inputs.PatchFields))
 	if err != nil {
 		return nil, err
+	}
+
+	if h.redactSensitiveValues {
+		support.RedactStatefulSet(response)
 	}
 
 	return &PatchStatefulSetOutputs{

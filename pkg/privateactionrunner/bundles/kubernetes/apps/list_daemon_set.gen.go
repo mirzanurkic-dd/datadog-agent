@@ -16,10 +16,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-type ListDaemonSetHandler struct{}
+type ListDaemonSetHandler struct {
+	redactSensitiveValues bool
+}
 
-func NewListDaemonSetHandler() *ListDaemonSetHandler {
-	return &ListDaemonSetHandler{}
+func NewListDaemonSetHandler(redactSensitiveValues bool) *ListDaemonSetHandler {
+	return &ListDaemonSetHandler{redactSensitiveValues: redactSensitiveValues}
 }
 
 type ListDaemonSetInputs struct {
@@ -50,6 +52,12 @@ func (h *ListDaemonSetHandler) Run(
 	response, err := client.AppsV1().DaemonSets(inputs.Namespace).List(ctx, support.MetaList(inputs.ListFields))
 	if err != nil {
 		return nil, err
+	}
+
+	if h.redactSensitiveValues {
+		for i := range response.Items {
+			support.RedactDaemonSet(&response.Items[i])
+		}
 	}
 
 	return &ListDaemonSetOutputs{

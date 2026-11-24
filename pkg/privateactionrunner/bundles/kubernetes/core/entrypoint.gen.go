@@ -11,7 +11,7 @@ type KubernetesCore struct {
 	actions map[string]types.Action
 }
 
-func NewKubernetesCore() *KubernetesCore {
+func NewKubernetesCore(redactSensitiveValues bool) *KubernetesCore {
 	return &KubernetesCore{
 		actions: map[string]types.Action{
 			// Manual actions
@@ -73,27 +73,27 @@ func NewKubernetesCore() *KubernetesCore {
 			"getPersistentVolumeClaim":             NewGetPersistentVolumeClaimHandler(),
 			"listPersistentVolumeClaim":            NewListPersistentVolumeClaimHandler(),
 			"patchPersistentVolumeClaim":           NewPatchPersistentVolumeClaimHandler(),
-			"createPod":                            NewCreatePodHandler(),
-			"updatePod":                            NewUpdatePodHandler(),
+			"createPod":                            NewCreatePodHandler(redactSensitiveValues),
+			"updatePod":                            NewUpdatePodHandler(redactSensitiveValues),
 			"deletePod":                            NewDeletePodHandler(),
 			"deleteMultiplePods":                   NewDeleteMultiplePodsHandler(),
-			"getPod":                               NewGetPodHandler(),
-			"listPod":                              NewListPodHandler(),
-			"patchPod":                             NewPatchPodHandler(),
-			"createPodTemplate":                    NewCreatePodTemplateHandler(),
-			"updatePodTemplate":                    NewUpdatePodTemplateHandler(),
+			"getPod":                               NewGetPodHandler(redactSensitiveValues),
+			"listPod":                              NewListPodHandler(redactSensitiveValues),
+			"patchPod":                             NewPatchPodHandler(redactSensitiveValues),
+			"createPodTemplate":                    NewCreatePodTemplateHandler(redactSensitiveValues),
+			"updatePodTemplate":                    NewUpdatePodTemplateHandler(redactSensitiveValues),
 			"deletePodTemplate":                    NewDeletePodTemplateHandler(),
 			"deleteMultiplePodTemplates":           NewDeleteMultiplePodTemplatesHandler(),
-			"getPodTemplate":                       NewGetPodTemplateHandler(),
-			"listPodTemplate":                      NewListPodTemplateHandler(),
-			"patchPodTemplate":                     NewPatchPodTemplateHandler(),
-			"createReplicationController":          NewCreateReplicationControllerHandler(),
-			"updateReplicationController":          NewUpdateReplicationControllerHandler(),
+			"getPodTemplate":                       NewGetPodTemplateHandler(redactSensitiveValues),
+			"listPodTemplate":                      NewListPodTemplateHandler(redactSensitiveValues),
+			"patchPodTemplate":                     NewPatchPodTemplateHandler(redactSensitiveValues),
+			"createReplicationController":          NewCreateReplicationControllerHandler(redactSensitiveValues),
+			"updateReplicationController":          NewUpdateReplicationControllerHandler(redactSensitiveValues),
 			"deleteReplicationController":          NewDeleteReplicationControllerHandler(),
 			"deleteMultipleReplicationControllers": NewDeleteMultipleReplicationControllersHandler(),
-			"getReplicationController":             NewGetReplicationControllerHandler(),
-			"listReplicationController":            NewListReplicationControllerHandler(),
-			"patchReplicationController":           NewPatchReplicationControllerHandler(),
+			"getReplicationController":             NewGetReplicationControllerHandler(redactSensitiveValues),
+			"listReplicationController":            NewListReplicationControllerHandler(redactSensitiveValues),
+			"patchReplicationController":           NewPatchReplicationControllerHandler(redactSensitiveValues),
 			"createResourceQuota":                  NewCreateResourceQuotaHandler(),
 			"updateResourceQuota":                  NewUpdateResourceQuotaHandler(),
 			"deleteResourceQuota":                  NewDeleteResourceQuotaHandler(),

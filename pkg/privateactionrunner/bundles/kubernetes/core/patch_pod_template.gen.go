@@ -19,10 +19,12 @@ import (
 	typesv1 "k8s.io/apimachinery/pkg/types"
 )
 
-type PatchPodTemplateHandler struct{}
+type PatchPodTemplateHandler struct {
+	redactSensitiveValues bool
+}
 
-func NewPatchPodTemplateHandler() *PatchPodTemplateHandler {
-	return &PatchPodTemplateHandler{}
+func NewPatchPodTemplateHandler(redactSensitiveValues bool) *PatchPodTemplateHandler {
+	return &PatchPodTemplateHandler{redactSensitiveValues: redactSensitiveValues}
 }
 
 type PatchPodTemplateInputs struct {
@@ -67,6 +69,10 @@ func (h *PatchPodTemplateHandler) Run(
 	response, err := client.CoreV1().PodTemplates(inputs.Namespace).Patch(ctx, inputs.Name, typesv1.JSONPatchType, body, support.MetaPatch(inputs.PatchFields))
 	if err != nil {
 		return nil, err
+	}
+
+	if h.redactSensitiveValues {
+		support.RedactPodTemplate(response)
 	}
 
 	return &PatchPodTemplateOutputs{

@@ -17,10 +17,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-type GetStatefulSetHandler struct{}
+type GetStatefulSetHandler struct {
+	redactSensitiveValues bool
+}
 
-func NewGetStatefulSetHandler() *GetStatefulSetHandler {
-	return &GetStatefulSetHandler{}
+func NewGetStatefulSetHandler(redactSensitiveValues bool) *GetStatefulSetHandler {
+	return &GetStatefulSetHandler{redactSensitiveValues: redactSensitiveValues}
 }
 
 type GetStatefulSetInputs struct {
@@ -59,6 +61,10 @@ func (h *GetStatefulSetHandler) Run(
 	response, err := client.AppsV1().StatefulSets(inputs.Namespace).Get(ctx, inputs.Name, support.MetaGet(inputs.GetFields))
 	if err != nil {
 		return nil, err
+	}
+
+	if h.redactSensitiveValues {
+		support.RedactStatefulSet(response)
 	}
 
 	return &GetStatefulSetOutputs{

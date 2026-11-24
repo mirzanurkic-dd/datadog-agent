@@ -17,10 +17,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-type GetDeploymentHandler struct{}
+type GetDeploymentHandler struct {
+	redactSensitiveValues bool
+}
 
-func NewGetDeploymentHandler() *GetDeploymentHandler {
-	return &GetDeploymentHandler{}
+func NewGetDeploymentHandler(redactSensitiveValues bool) *GetDeploymentHandler {
+	return &GetDeploymentHandler{redactSensitiveValues: redactSensitiveValues}
 }
 
 type GetDeploymentInputs struct {
@@ -59,6 +61,10 @@ func (h *GetDeploymentHandler) Run(
 	response, err := client.AppsV1().Deployments(inputs.Namespace).Get(ctx, inputs.Name, support.MetaGet(inputs.GetFields))
 	if err != nil {
 		return nil, err
+	}
+
+	if h.redactSensitiveValues {
+		support.RedactDeployment(response)
 	}
 
 	return &GetDeploymentOutputs{

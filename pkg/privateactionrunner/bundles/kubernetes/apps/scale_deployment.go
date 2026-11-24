@@ -18,10 +18,12 @@ import (
 	"github.com/DataDog/datadog-agent/pkg/privateactionrunner/types"
 )
 
-type ScaleDeploymentHandler struct{}
+type ScaleDeploymentHandler struct {
+	redactSensitiveValues bool
+}
 
-func NewScaleDeploymentHandler() *ScaleDeploymentHandler {
-	return &ScaleDeploymentHandler{}
+func NewScaleDeploymentHandler(redactSensitiveValues bool) *ScaleDeploymentHandler {
+	return &ScaleDeploymentHandler{redactSensitiveValues: redactSensitiveValues}
 }
 
 type ScaleDeploymentInputs struct {
@@ -63,6 +65,10 @@ func (h *ScaleDeploymentHandler) Run(
 	response, err := client.AppsV1().Deployments(inputs.Namespace).Patch(ctx, inputs.Name, typesv1.MergePatchType, body, metav1.PatchOptions{})
 	if err != nil {
 		return nil, err
+	}
+
+	if h.redactSensitiveValues {
+		support.RedactDeployment(response)
 	}
 
 	return &ScaleDeploymentOutputs{

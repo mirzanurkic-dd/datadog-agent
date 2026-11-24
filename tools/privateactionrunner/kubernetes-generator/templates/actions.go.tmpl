@@ -20,11 +20,21 @@ import (
 	{{ end -}}
 )
 
+{{ if .RedactsSensitiveValues -}}
+type {{ .Name | title }}Handler struct {
+	redactSensitiveValues bool
+}
+
+func New{{ .Name | title }}Handler(redactSensitiveValues bool) *{{ .Name | title }}Handler {
+	return &{{ .Name | title }}Handler{redactSensitiveValues: redactSensitiveValues}
+}
+{{- else -}}
 type {{ .Name | title }}Handler struct{}
 
 func New{{ .Name | title }}Handler() *{{ .Name | title }}Handler {
 	return &{{ .Name | title }}Handler{}
 }
+{{- end }}
 
 type {{ .Name | title }}Inputs struct{
 	{{ if .SDKMethod | eq "DeleteCollection" -}}
@@ -94,6 +104,17 @@ func (h *{{ .Name | title }}Handler) Run(
 		return nil, err
 	}
 
+	{{ if .RedactsSensitiveValues -}}
+	if h.redactSensitiveValues {
+		{{ if .SDKMethod | eq "List" -}}
+		for i := range response.Items {
+			support.Redact{{ .Resource.Name }}(&response.Items[i])
+		}
+		{{- else -}}
+		support.Redact{{ .Resource.Name }}(response)
+		{{- end }}
+	}
+	{{ end }}
 	return &{{ .Name | title }}Outputs{
 	{{ if .SDKMethod | eq "List" -}}
 		Items:    response.Items,

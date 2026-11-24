@@ -23,11 +23,12 @@ import (
 )
 
 type ScaleDeploymentVerticallyHandler struct {
-	c kubernetes.Interface
+	redactSensitiveValues bool
+	c                     kubernetes.Interface
 }
 
-func NewScaleDeploymentVerticallyHandler() *ScaleDeploymentVerticallyHandler {
-	return &ScaleDeploymentVerticallyHandler{}
+func NewScaleDeploymentVerticallyHandler(redactSensitiveValues bool) *ScaleDeploymentVerticallyHandler {
+	return &ScaleDeploymentVerticallyHandler{redactSensitiveValues: redactSensitiveValues}
 }
 
 type ContainerResourceUpdate struct {
@@ -175,6 +176,10 @@ func (h *ScaleDeploymentVerticallyHandler) Run(
 	response, err := client.AppsV1().Deployments(inputs.Namespace).Patch(ctx, inputs.Name, typesv1.StrategicMergePatchType, body, metav1.PatchOptions{})
 	if err != nil {
 		return nil, err
+	}
+
+	if h.redactSensitiveValues {
+		support.RedactDeployment(response)
 	}
 
 	return &ScaleDeploymentVerticallyOutputs{

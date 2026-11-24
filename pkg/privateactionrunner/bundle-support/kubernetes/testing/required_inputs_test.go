@@ -32,7 +32,7 @@ func TestGeneratedActionsRejectMissingInputs(t *testing.T) {
 	}{
 		{
 			name:   "apps",
-			bundle: apps.NewKubernetesApps(),
+			bundle: apps.NewKubernetesApps(true),
 			resources: []generatedActionResource{
 				{name: "ControllerRevision", namespaced: true},
 				{name: "DaemonSet", namespaced: true},
@@ -43,7 +43,7 @@ func TestGeneratedActionsRejectMissingInputs(t *testing.T) {
 		},
 		{
 			name:   "batch",
-			bundle: batch.NewKubernetesBatch(),
+			bundle: batch.NewKubernetesBatch(true),
 			resources: []generatedActionResource{
 				{name: "CronJob", namespaced: true},
 				{name: "Job", namespaced: true},
@@ -51,7 +51,7 @@ func TestGeneratedActionsRejectMissingInputs(t *testing.T) {
 		},
 		{
 			name:   "core",
-			bundle: core.NewKubernetesCore(),
+			bundle: core.NewKubernetesCore(true),
 			resources: []generatedActionResource{
 				{name: "ConfigMap", namespaced: true},
 				{name: "Endpoints", namespaced: true},

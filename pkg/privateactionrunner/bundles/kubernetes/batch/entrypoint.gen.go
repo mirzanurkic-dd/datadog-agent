@@ -11,26 +11,26 @@ type KubernetesBatch struct {
 	actions map[string]types.Action
 }
 
-func NewKubernetesBatch() *KubernetesBatch {
+func NewKubernetesBatch(redactSensitiveValues bool) *KubernetesBatch {
 	return &KubernetesBatch{
 		actions: map[string]types.Action{
 			// Manual actions
-			"updateCronJobSchedule": NewUpdateCronJobScheduleHandler(),
+			"updateCronJobSchedule": NewUpdateCronJobScheduleHandler(redactSensitiveValues),
 			// Auto-generated actions
-			"createCronJob":          NewCreateCronJobHandler(),
-			"updateCronJob":          NewUpdateCronJobHandler(),
+			"createCronJob":          NewCreateCronJobHandler(redactSensitiveValues),
+			"updateCronJob":          NewUpdateCronJobHandler(redactSensitiveValues),
 			"deleteCronJob":          NewDeleteCronJobHandler(),
 			"deleteMultipleCronJobs": NewDeleteMultipleCronJobsHandler(),
-			"getCronJob":             NewGetCronJobHandler(),
-			"listCronJob":            NewListCronJobHandler(),
-			"patchCronJob":           NewPatchCronJobHandler(),
-			"createJob":              NewCreateJobHandler(),
-			"updateJob":              NewUpdateJobHandler(),
+			"getCronJob":             NewGetCronJobHandler(redactSensitiveValues),
+			"listCronJob":            NewListCronJobHandler(redactSensitiveValues),
+			"patchCronJob":           NewPatchCronJobHandler(redactSensitiveValues),
+			"createJob":              NewCreateJobHandler(redactSensitiveValues),
+			"updateJob":              NewUpdateJobHandler(redactSensitiveValues),
 			"deleteJob":              NewDeleteJobHandler(),
 			"deleteMultipleJobs":     NewDeleteMultipleJobsHandler(),
-			"getJob":                 NewGetJobHandler(),
-			"listJob":                NewListJobHandler(),
-			"patchJob":               NewPatchJobHandler(),
+			"getJob":                 NewGetJobHandler(redactSensitiveValues),
+			"listJob":                NewListJobHandler(redactSensitiveValues),
+			"patchJob":               NewPatchJobHandler(redactSensitiveValues),
 		},
 	}
 }

@@ -17,10 +17,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-type UpdateReplicationControllerHandler struct{}
+type UpdateReplicationControllerHandler struct {
+	redactSensitiveValues bool
+}
 
-func NewUpdateReplicationControllerHandler() *UpdateReplicationControllerHandler {
-	return &UpdateReplicationControllerHandler{}
+func NewUpdateReplicationControllerHandler(redactSensitiveValues bool) *UpdateReplicationControllerHandler {
+	return &UpdateReplicationControllerHandler{redactSensitiveValues: redactSensitiveValues}
 }
 
 type UpdateReplicationControllerInputs struct {
@@ -60,6 +62,10 @@ func (h *UpdateReplicationControllerHandler) Run(
 	response, err := client.CoreV1().ReplicationControllers(inputs.Namespace).Update(ctx, inputs.Body, support.MetaUpdate(inputs.UpdateFields))
 	if err != nil {
 		return nil, err
+	}
+
+	if h.redactSensitiveValues {
+		support.RedactReplicationController(response)
 	}
 
 	return &UpdateReplicationControllerOutputs{

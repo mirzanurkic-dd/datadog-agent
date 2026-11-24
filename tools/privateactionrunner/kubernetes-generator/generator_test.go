@@ -90,10 +90,12 @@ type HorizontalPodAutoscalerInterface interface {
 
 	manual, err := manualActions(source)
 	require.NoError(t, err)
-	require.Equal(t, []string{"alpha", "zulu"}, manual)
+	require.Equal(t, []manualAction{{Name: "alpha"}, {Name: "zulu"}}, manual)
 	entry := string(files["entrypoint.gen.go"])
+	require.Contains(t, entry, "NewKubernetesAutoscaling() *KubernetesAutoscaling", "no redacted resource, no setting")
 	require.Contains(t, entry, `"alpha": NewAlphaHandler()`)
 	require.Contains(t, entry, `"zulu":  NewZuluHandler()`)
+	require.NotContains(t, create, "redactSensitiveValues")
 	require.NotContains(t, entry, "NewHelperHandler")
 	require.NotContains(t, entry, "NewReceiverHandler")
 	cfg.Resources = []string{"MissingResource"}
@@ -171,4 +173,58 @@ type EndpointSliceInterface interface { Get() }
 	require.FileExists(t, handwritten)
 	require.FileExists(t, unselected)
 	require.ErrorContains(t, run(root, "unknown", source, out, false), "unknown bundle")
+}
+
+func TestGenerateBundleRedactedResource(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "bundle")
+	writeFixture(t, filepath.Join(source, "manual.go"), `package bundle
+func NewRestartPodHandler(redactSensitiveValues bool) *RestartPodHandler { return nil }
+func NewPingHandler() *PingHandler { return nil }
+`)
+	writeFixture(t, filepath.Join(root, "k8s.io/api/core/v1/types.go"), `package v1
+type Pod struct { Spec PodSpec }
+`)
+	writeFixture(t, filepath.Join(root, "k8s.io/client-go/kubernetes/typed/core/v1/pod.go"), `package v1
+type PodsGetter interface { Pods(namespace string) PodInterface }
+type PodInterface interface {
+	Get()
+	List()
+	Delete()
+}
+`)
+	cfg := targetConfig{Version: "v1", CopyrightYear: 2026, Resources: []string{"Pod"}, RedactedResources: []string{"Pod"}}
+	files, err := generateBundle(root, "core", source, cfg)
+	require.NoError(t, err)
+
+	get := string(files["get_pod.gen.go"])
+	require.Contains(t, get, "func NewGetPodHandler(redactSensitiveValues bool) *GetPodHandler")
+	require.Contains(t, get, "if h.redactSensitiveValues {\n\t\tsupport.RedactPod(response)\n\t}")
+	list := string(files["list_pod.gen.go"])
+	require.Contains(t, list, "for i := range response.Items {\n\t\t\tsupport.RedactPod(&response.Items[i])")
+	require.NotContains(t, string(files["delete_pod.gen.go"]), "redactSensitiveValues", "delete returns no object")
+
+	entry := string(files["entrypoint.gen.go"])
+	for _, want := range []string{
+		"func NewKubernetesCore(redactSensitiveValues bool) *KubernetesCore",
+		`"restartPod": NewRestartPodHandler(redactSensitiveValues)`,
+		`"ping":       NewPingHandler()`,
+		`"getPod":    NewGetPodHandler(redactSensitiveValues)`,
+		`"deletePod": NewDeletePodHandler()`,
+	} {
+		require.Contains(t, entry, want)
+	}
+
+	cfg.RedactedResources = []string{"Deployment"}
+	_, err = generateBundle(root, "core", source, cfg)
+	require.ErrorContains(t, err, "redacted resource Deployment is not in resources")
+}
+
+func TestManualActionsRejectUnknownConstructorParameters(t *testing.T) {
+	source := t.TempDir()
+	writeFixture(t, filepath.Join(source, "manual.go"), `package bundle
+func NewPingHandler(client Client) *PingHandler { return nil }
+`)
+	_, err := manualActions(source)
+	require.ErrorContains(t, err, "manual action ping: constructor must take no parameters or (redactSensitiveValues bool)")
 }

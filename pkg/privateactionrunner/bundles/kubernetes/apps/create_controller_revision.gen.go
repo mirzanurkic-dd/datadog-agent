@@ -18,10 +18,12 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-type CreateControllerRevisionHandler struct{}
+type CreateControllerRevisionHandler struct {
+	redactSensitiveValues bool
+}
 
-func NewCreateControllerRevisionHandler() *CreateControllerRevisionHandler {
-	return &CreateControllerRevisionHandler{}
+func NewCreateControllerRevisionHandler(redactSensitiveValues bool) *CreateControllerRevisionHandler {
+	return &CreateControllerRevisionHandler{redactSensitiveValues: redactSensitiveValues}
 }
 
 type CreateControllerRevisionInputs struct {
@@ -61,6 +63,10 @@ func (h *CreateControllerRevisionHandler) Run(
 	response, err := client.AppsV1().ControllerRevisions(inputs.Namespace).Create(ctx, inputs.Body, support.MetaCreate(inputs.CreateFields))
 	if err != nil {
 		return nil, err
+	}
+
+	if h.redactSensitiveValues {
+		support.RedactControllerRevision(response)
 	}
 
 	return &CreateControllerRevisionOutputs{

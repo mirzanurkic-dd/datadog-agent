@@ -14,10 +14,13 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
-type CreateCustomObjectHandler struct{ policy resourcePolicy }
+type CreateCustomObjectHandler struct {
+	policy                resourcePolicy
+	redactSensitiveValues bool
+}
 
-func NewCreateCustomObjectHandler(policy resourcePolicy) *CreateCustomObjectHandler {
-	return &CreateCustomObjectHandler{policy: policy}
+func NewCreateCustomObjectHandler(policy resourcePolicy, redactSensitiveValues bool) *CreateCustomObjectHandler {
+	return &CreateCustomObjectHandler{policy: policy, redactSensitiveValues: redactSensitiveValues}
 }
 
 type CreateCustomObjectInputs struct {
@@ -54,6 +57,10 @@ func (h *CreateCustomObjectHandler) Run(
 	resp, err := client.Resource(gvr).Namespace(inputs.Namespace).Create(ctx, &unstructured.Unstructured{Object: inputs.Body}, support.MetaCreate(inputs.CreateFields))
 	if err != nil {
 		return nil, err
+	}
+
+	if h.redactSensitiveValues {
+		support.RedactUnstructured(resp.Object)
 	}
 
 	return resp.Object, nil

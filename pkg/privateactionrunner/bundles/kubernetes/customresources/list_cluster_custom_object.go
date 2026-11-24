@@ -14,10 +14,13 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
-type ListClusterCustomObjectHandler struct{ policy resourcePolicy }
+type ListClusterCustomObjectHandler struct {
+	policy                resourcePolicy
+	redactSensitiveValues bool
+}
 
-func NewListClusterCustomObjectHandler(policy resourcePolicy) *ListClusterCustomObjectHandler {
-	return &ListClusterCustomObjectHandler{policy: policy}
+func NewListClusterCustomObjectHandler(policy resourcePolicy, redactSensitiveValues bool) *ListClusterCustomObjectHandler {
+	return &ListClusterCustomObjectHandler{policy: policy, redactSensitiveValues: redactSensitiveValues}
 }
 
 type ListClusterCustomObjectInputs struct {
@@ -55,6 +58,12 @@ func (h *ListClusterCustomObjectHandler) Run(
 	resp, err := client.Resource(gvr).List(ctx, support.MetaList(inputs.ListFields))
 	if err != nil {
 		return nil, err
+	}
+
+	if h.redactSensitiveValues {
+		for i := range resp.Items {
+			support.RedactUnstructured(resp.Items[i].Object)
+		}
 	}
 
 	return &ListClusterCustomObjectOutputs{

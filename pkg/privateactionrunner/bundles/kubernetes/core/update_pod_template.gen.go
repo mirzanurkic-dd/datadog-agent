@@ -17,10 +17,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-type UpdatePodTemplateHandler struct{}
+type UpdatePodTemplateHandler struct {
+	redactSensitiveValues bool
+}
 
-func NewUpdatePodTemplateHandler() *UpdatePodTemplateHandler {
-	return &UpdatePodTemplateHandler{}
+func NewUpdatePodTemplateHandler(redactSensitiveValues bool) *UpdatePodTemplateHandler {
+	return &UpdatePodTemplateHandler{redactSensitiveValues: redactSensitiveValues}
 }
 
 type UpdatePodTemplateInputs struct {
@@ -59,6 +61,10 @@ func (h *UpdatePodTemplateHandler) Run(
 	response, err := client.CoreV1().PodTemplates(inputs.Namespace).Update(ctx, inputs.Body, support.MetaUpdate(inputs.UpdateFields))
 	if err != nil {
 		return nil, err
+	}
+
+	if h.redactSensitiveValues {
+		support.RedactPodTemplate(response)
 	}
 
 	return &UpdatePodTemplateOutputs{

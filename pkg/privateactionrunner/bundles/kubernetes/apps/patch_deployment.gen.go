@@ -19,10 +19,12 @@ import (
 	typesv1 "k8s.io/apimachinery/pkg/types"
 )
 
-type PatchDeploymentHandler struct{}
+type PatchDeploymentHandler struct {
+	redactSensitiveValues bool
+}
 
-func NewPatchDeploymentHandler() *PatchDeploymentHandler {
-	return &PatchDeploymentHandler{}
+func NewPatchDeploymentHandler(redactSensitiveValues bool) *PatchDeploymentHandler {
+	return &PatchDeploymentHandler{redactSensitiveValues: redactSensitiveValues}
 }
 
 type PatchDeploymentInputs struct {
@@ -68,6 +70,10 @@ func (h *PatchDeploymentHandler) Run(
 	response, err := client.AppsV1().Deployments(inputs.Namespace).Patch(ctx, inputs.Name, typesv1.JSONPatchType, body, support.MetaPatch(inputs.PatchFields))
 	if err != nil {
 		return nil, err
+	}
+
+	if h.redactSensitiveValues {
+		support.RedactDeployment(response)
 	}
 
 	return &PatchDeploymentOutputs{

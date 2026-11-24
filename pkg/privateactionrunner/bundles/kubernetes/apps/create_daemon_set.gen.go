@@ -17,10 +17,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-type CreateDaemonSetHandler struct{}
+type CreateDaemonSetHandler struct {
+	redactSensitiveValues bool
+}
 
-func NewCreateDaemonSetHandler() *CreateDaemonSetHandler {
-	return &CreateDaemonSetHandler{}
+func NewCreateDaemonSetHandler(redactSensitiveValues bool) *CreateDaemonSetHandler {
+	return &CreateDaemonSetHandler{redactSensitiveValues: redactSensitiveValues}
 }
 
 type CreateDaemonSetInputs struct {
@@ -60,6 +62,10 @@ func (h *CreateDaemonSetHandler) Run(
 	response, err := client.AppsV1().DaemonSets(inputs.Namespace).Create(ctx, inputs.Body, support.MetaCreate(inputs.CreateFields))
 	if err != nil {
 		return nil, err
+	}
+
+	if h.redactSensitiveValues {
+		support.RedactDaemonSet(response)
 	}
 
 	return &CreateDaemonSetOutputs{

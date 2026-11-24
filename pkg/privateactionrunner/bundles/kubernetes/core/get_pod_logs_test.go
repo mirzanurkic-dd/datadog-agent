@@ -18,7 +18,7 @@ import (
 )
 
 func TestGetPodLogsRegistered(t *testing.T) {
-	_, ok := NewKubernetesCore().GetAction("getPodLogs").(*GetPodLogsHandler)
+	_, ok := NewKubernetesCore(true).GetAction("getPodLogs").(*GetPodLogsHandler)
 	require.True(t, ok)
 }
 

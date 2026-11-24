@@ -26,7 +26,10 @@ go_library(
 
 dd_agent_go_test(
     name = "kubeactions_test",
-    srcs = ["entrypoint_test.go"],
+    srcs = [
+        "entrypoint_test.go",
+        "get_resource_test.go",
+    ],
     embed = [":kubeactions"],
     gotags_sets = [[
         "cel",
@@ -37,6 +40,7 @@ dd_agent_go_test(
     include_default = False,
     deps = [
         "//comp/kubeactions/kubeactions/def",
+        "//pkg/privateactionrunner/bundle-support/kubernetes",
         "//pkg/privateactionrunner/types",
         "@com_github_stretchr_testify//assert",
     ],

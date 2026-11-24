@@ -16,10 +16,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-type ListStatefulSetHandler struct{}
+type ListStatefulSetHandler struct {
+	redactSensitiveValues bool
+}
 
-func NewListStatefulSetHandler() *ListStatefulSetHandler {
-	return &ListStatefulSetHandler{}
+func NewListStatefulSetHandler(redactSensitiveValues bool) *ListStatefulSetHandler {
+	return &ListStatefulSetHandler{redactSensitiveValues: redactSensitiveValues}
 }
 
 type ListStatefulSetInputs struct {
@@ -50,6 +52,12 @@ func (h *ListStatefulSetHandler) Run(
 	response, err := client.AppsV1().StatefulSets(inputs.Namespace).List(ctx, support.MetaList(inputs.ListFields))
 	if err != nil {
 		return nil, err
+	}
+
+	if h.redactSensitiveValues {
+		for i := range response.Items {
+			support.RedactStatefulSet(&response.Items[i])
+		}
 	}
 
 	return &ListStatefulSetOutputs{

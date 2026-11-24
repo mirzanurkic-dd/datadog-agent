@@ -1,3 +1,8 @@
+# Per bundle:
+#   resources: Kubernetes resources to generate actions for.
+#   redactedResources: resources that embed a pod spec. Their actions redact
+#     sensitive values from the returned objects with support.Redact<Resource>
+#     when private_action_runner.kubernetes_redact_sensitive_values is enabled.
 apps:
   version: v1
   copyrightYear: 2025
@@ -7,10 +12,19 @@ apps:
     - Deployment
     - ReplicaSet
     - StatefulSet
+  redactedResources:
+    - ControllerRevision
+    - DaemonSet
+    - Deployment
+    - ReplicaSet
+    - StatefulSet
 batch:
   version: v1
   copyrightYear: 2025
   resources:
+    - CronJob
+    - Job
+  redactedResources:
     - CronJob
     - Job
 core:
@@ -31,6 +45,10 @@ core:
     - ResourceQuota
     - Service
     - ServiceAccount
+  redactedResources:
+    - Pod
+    - PodTemplate
+    - ReplicationController
 discovery:
   version: v1
   copyrightYear: 2026

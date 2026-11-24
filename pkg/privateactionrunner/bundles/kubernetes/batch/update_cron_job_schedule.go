@@ -20,11 +20,12 @@ import (
 )
 
 type UpdateCronJobScheduleHandler struct {
-	client kubernetes.Interface
+	redactSensitiveValues bool
+	client                kubernetes.Interface
 }
 
-func NewUpdateCronJobScheduleHandler() *UpdateCronJobScheduleHandler {
-	return &UpdateCronJobScheduleHandler{}
+func NewUpdateCronJobScheduleHandler(redactSensitiveValues bool) *UpdateCronJobScheduleHandler {
+	return &UpdateCronJobScheduleHandler{redactSensitiveValues: redactSensitiveValues}
 }
 
 type UpdateCronJobScheduleInputs struct {
@@ -85,6 +86,10 @@ func (h *UpdateCronJobScheduleHandler) Run(
 	)
 	if err != nil {
 		return nil, err
+	}
+
+	if h.redactSensitiveValues {
+		support.RedactCronJob(response)
 	}
 
 	return &UpdateCronJobScheduleOutputs{CronJob: response}, nil

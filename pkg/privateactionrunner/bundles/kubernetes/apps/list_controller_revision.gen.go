@@ -16,10 +16,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-type ListControllerRevisionHandler struct{}
+type ListControllerRevisionHandler struct {
+	redactSensitiveValues bool
+}
 
-func NewListControllerRevisionHandler() *ListControllerRevisionHandler {
-	return &ListControllerRevisionHandler{}
+func NewListControllerRevisionHandler(redactSensitiveValues bool) *ListControllerRevisionHandler {
+	return &ListControllerRevisionHandler{redactSensitiveValues: redactSensitiveValues}
 }
 
 type ListControllerRevisionInputs struct {
@@ -50,6 +52,12 @@ func (h *ListControllerRevisionHandler) Run(
 	response, err := client.AppsV1().ControllerRevisions(inputs.Namespace).List(ctx, support.MetaList(inputs.ListFields))
 	if err != nil {
 		return nil, err
+	}
+
+	if h.redactSensitiveValues {
+		for i := range response.Items {
+			support.RedactControllerRevision(&response.Items[i])
+		}
 	}
 
 	return &ListControllerRevisionOutputs{

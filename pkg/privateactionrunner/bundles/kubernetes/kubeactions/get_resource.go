@@ -10,6 +10,7 @@ package com_datadoghq_kubernetes_kubeactions
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 
 	kubeactions "github.com/DataDog/datadog-agent/comp/kubeactions/kubeactions/def"
 	kubeactionsimpl "github.com/DataDog/datadog-agent/comp/kubeactions/kubeactions/impl"
@@ -20,12 +21,13 @@ import (
 
 // GetResourceHandler handles the get_resource action.
 type GetResourceHandler struct {
-	ka kubeactions.Component
+	ka                    kubeactions.Component
+	redactSensitiveValues bool
 }
 
 // NewGetResourceHandler creates a new GetResourceHandler.
-func NewGetResourceHandler(ka kubeactions.Component) types.Action {
-	return &GetResourceHandler{ka: ka}
+func NewGetResourceHandler(ka kubeactions.Component, redactSensitiveValues bool) types.Action {
+	return &GetResourceHandler{ka: ka, redactSensitiveValues: redactSensitiveValues}
 }
 
 // GetResourceOutputs is the result returned to the Datadog backend for the
@@ -60,6 +62,10 @@ func (h *GetResourceHandler) Run(
 	}
 
 	result := kubeactionsimpl.NewGetResourceExecutor(client, h.ka.CustomSensitiveWords()).Execute(ctx, in)
+	// Redact before reporting: the reported result carries the resources too.
+	if h.redactSensitiveValues {
+		result = redactPayloads(result)
+	}
 	h.ka.ReportResult(report, result)
 
 	if err := actionErr(result); err != nil {
@@ -73,4 +79,20 @@ func (h *GetResourceHandler) Run(
 		}
 	}
 	return out, nil
+}
+
+// redactPayloads redacts every resource returned in result. A resource that
+// cannot be redacted fails the whole result rather than leaking it.
+func redactPayloads(result kubeactions.ExecutionResult) kubeactions.ExecutionResult {
+	for name, payload := range result.Payloads {
+		redacted, err := support.RedactJSON(payload)
+		if err != nil {
+			return kubeactions.ExecutionResult{
+				Status:  kubeactions.StatusFailed,
+				Message: fmt.Sprintf("failed to redact resource %s: %v", name, err),
+			}
+		}
+		result.Payloads[name] = redacted
+	}
+	return result
 }

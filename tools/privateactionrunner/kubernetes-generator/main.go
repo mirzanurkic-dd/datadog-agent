@@ -26,9 +26,10 @@ import (
 var assets embed.FS
 
 type targetConfig struct {
-	Version       string   `yaml:"version"`
-	CopyrightYear int      `yaml:"copyrightYear"`
-	Resources     []string `yaml:"resources"`
+	Version           string   `yaml:"version"`
+	CopyrightYear     int      `yaml:"copyrightYear"`
+	Resources         []string `yaml:"resources"`
+	RedactedResources []string `yaml:"redactedResources"`
 }
 
 type action struct {
@@ -40,6 +41,8 @@ type action struct {
 	RequiredImports       []string
 	StandardImports       []string
 	NamespaceRequired     bool
+	// RedactsSensitiveValues is set for actions returning objects that embed a pod spec.
+	RedactsSensitiveValues bool
 }
 
 type resource struct {
@@ -54,10 +57,34 @@ type field struct {
 }
 
 type entrypoint struct {
-	Package           string
-	CopyrightYear     int
-	Actions           []action
-	ManualActionNames []string
+	Package       string
+	CopyrightYear int
+	Actions       []action
+	ManualActions []manualAction
+}
+
+// RedactsSensitiveValues reports whether any action of the bundle needs the
+// redaction setting.
+func (e entrypoint) RedactsSensitiveValues() bool {
+	for _, a := range e.Actions {
+		if a.RedactsSensitiveValues {
+			return true
+		}
+	}
+	for _, a := range e.ManualActions {
+		if a.RedactsSensitiveValues {
+			return true
+		}
+	}
+	return false
+}
+
+// manualAction is a handwritten action found in the bundle source directory.
+type manualAction struct {
+	Name string
+	// RedactsSensitiveValues is set when the constructor takes the redaction
+	// setting, i.e. is declared as New<Action>Handler(redactSensitiveValues bool).
+	RedactsSensitiveValues bool
 }
 
 func main() {

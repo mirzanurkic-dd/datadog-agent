@@ -11,25 +11,25 @@ type KubernetesCustomResources struct {
 	actions map[string]types.Action
 }
 
-func NewKubernetesCustomResources(allowedResources []string) *KubernetesCustomResources {
+func NewKubernetesCustomResources(allowedResources []string, redactSensitiveValues bool) *KubernetesCustomResources {
 	policy := newResourcePolicy(allowedResources)
 	return &KubernetesCustomResources{
 		actions: map[string]types.Action{
 			// Manual actions
-			"createCustomObject":                 NewCreateCustomObjectHandler(policy),
+			"createCustomObject":                 NewCreateCustomObjectHandler(policy, redactSensitiveValues),
 			"deleteCustomObject":                 NewDeleteCustomObjectHandler(policy),
 			"deleteMultipleCustomObjects":        NewDeleteMultipleCustomObjectsHandler(policy),
-			"getCustomObject":                    NewGetCustomObjectHandler(policy),
-			"listCustomObject":                   NewListCustomObjectHandler(policy),
-			"patchCustomObject":                  NewPatchCustomObjectHandler(policy),
-			"updateCustomObject":                 NewUpdateCustomObjectHandler(policy),
-			"createClusterCustomObject":          NewCreateClusterCustomObjectHandler(policy),
+			"getCustomObject":                    NewGetCustomObjectHandler(policy, redactSensitiveValues),
+			"listCustomObject":                   NewListCustomObjectHandler(policy, redactSensitiveValues),
+			"patchCustomObject":                  NewPatchCustomObjectHandler(policy, redactSensitiveValues),
+			"updateCustomObject":                 NewUpdateCustomObjectHandler(policy, redactSensitiveValues),
+			"createClusterCustomObject":          NewCreateClusterCustomObjectHandler(policy, redactSensitiveValues),
 			"deleteClusterCustomObject":          NewDeleteClusterCustomObjectHandler(policy),
 			"deleteMultipleClusterCustomObjects": NewDeleteMultipleClusterCustomObjectsHandler(policy),
-			"getClusterCustomObject":             NewGetClusterCustomObjectHandler(policy),
-			"listClusterCustomObject":            NewListClusterCustomObjectHandler(policy),
-			"patchClusterCustomObject":           NewPatchClusterCustomObjectHandler(policy),
-			"updateClusterCustomObject":          NewUpdateClusterCustomObjectHandler(policy),
+			"getClusterCustomObject":             NewGetClusterCustomObjectHandler(policy, redactSensitiveValues),
+			"listClusterCustomObject":            NewListClusterCustomObjectHandler(policy, redactSensitiveValues),
+			"patchClusterCustomObject":           NewPatchClusterCustomObjectHandler(policy, redactSensitiveValues),
+			"updateClusterCustomObject":          NewUpdateClusterCustomObjectHandler(policy, redactSensitiveValues),
 		},
 	}
 }

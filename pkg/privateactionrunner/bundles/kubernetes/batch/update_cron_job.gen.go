@@ -17,10 +17,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-type UpdateCronJobHandler struct{}
+type UpdateCronJobHandler struct {
+	redactSensitiveValues bool
+}
 
-func NewUpdateCronJobHandler() *UpdateCronJobHandler {
-	return &UpdateCronJobHandler{}
+func NewUpdateCronJobHandler(redactSensitiveValues bool) *UpdateCronJobHandler {
+	return &UpdateCronJobHandler{redactSensitiveValues: redactSensitiveValues}
 }
 
 type UpdateCronJobInputs struct {
@@ -60,6 +62,10 @@ func (h *UpdateCronJobHandler) Run(
 	response, err := client.BatchV1().CronJobs(inputs.Namespace).Update(ctx, inputs.Body, support.MetaUpdate(inputs.UpdateFields))
 	if err != nil {
 		return nil, err
+	}
+
+	if h.redactSensitiveValues {
+		support.RedactCronJob(response)
 	}
 
 	return &UpdateCronJobOutputs{

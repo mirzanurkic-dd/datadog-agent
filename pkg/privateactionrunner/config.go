@@ -50,6 +50,7 @@ const (
 
 	// Kubernetes action related
 	KubernetesAllowedCustomResources = "private_action_runner.kubernetes_allowed_custom_resources"
+	KubernetesRedactSensitiveValues  = "private_action_runner.kubernetes_redact_sensitive_values"
 
 	// Restricted Shell
 	RestrictedShellAllowedPaths             = "private_action_runner.restricted_shell.allowed_paths"

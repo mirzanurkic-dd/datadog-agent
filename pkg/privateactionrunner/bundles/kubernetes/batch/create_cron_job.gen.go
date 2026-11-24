@@ -17,10 +17,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-type CreateCronJobHandler struct{}
+type CreateCronJobHandler struct {
+	redactSensitiveValues bool
+}
 
-func NewCreateCronJobHandler() *CreateCronJobHandler {
-	return &CreateCronJobHandler{}
+func NewCreateCronJobHandler(redactSensitiveValues bool) *CreateCronJobHandler {
+	return &CreateCronJobHandler{redactSensitiveValues: redactSensitiveValues}
 }
 
 type CreateCronJobInputs struct {
@@ -60,6 +62,10 @@ func (h *CreateCronJobHandler) Run(
 	response, err := client.BatchV1().CronJobs(inputs.Namespace).Create(ctx, inputs.Body, support.MetaCreate(inputs.CreateFields))
 	if err != nil {
 		return nil, err
+	}
+
+	if h.redactSensitiveValues {
+		support.RedactCronJob(response)
 	}
 
 	return &CreateCronJobOutputs{
