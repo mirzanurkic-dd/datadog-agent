@@ -501,8 +501,9 @@ func pcieLinkMetrics(device ddnvml.Device) ([]Sample, uint64, error) {
 	// and the PCIe link is only a sideband, which the driver negotiates down by design
 	// (Gen4 x1 of x16 max on GB200). Comparing current against max there reports every
 	// GPU as permanently degraded, hiding real PCIe degradations elsewhere, so the
-	// comparison is only made for GPUs actually attached over PCIe. The current and max
-	// values are still reported, tagged with the host link protocol that explains them.
+	// comparison is only made for GPUs actually attached over PCIe. Only the two
+	// degradation metrics carry the host_link tag, to make that exception visible; the
+	// current and max values are reported unchanged and untagged.
 	c2c := device.GetDeviceInfo().IsC2CEnabled()
 
 	currentWidth, err := device.GetCurrPcieLinkWidth()

@@ -1025,8 +1025,15 @@ func TestPCIELinkMetrics(t *testing.T) {
 			for metricName, expectedValue := range test.expectedMetricVals {
 				metric := findMetric(metricsOut, metricName)
 				require.NotNil(t, metric, "expected metric %s", metricName)
-				require.InDelta(t, expectedValue, metric.Value, 1e6)
 				require.Equal(t, metrics.GaugeType, metric.Type)
+				if metricName == "pci.link.speed.current" || metricName == "pci.link.speed.max" {
+					// Link speeds are derived in bits per second, so they allow for rounding.
+					require.InDelta(t, expectedValue, metric.Value, 1e6, "metric %s", metricName)
+				} else {
+					// Widths and the degradation flags are exact: a tolerance here would
+					// accept 1 where 0 is expected and make the flags untested.
+					require.Equal(t, expectedValue, metric.Value, "metric %s", metricName)
+				}
 				if strings.HasSuffix(metricName, ".degraded") {
 					require.Equal(t, []string{expectedHostLink}, metric.Tags(), "metric %s", metricName)
 				} else {
